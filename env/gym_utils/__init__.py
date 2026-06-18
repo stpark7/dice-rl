@@ -137,6 +137,31 @@ def make_async(
             else SyncVectorEnv(env_fns)
         )
     
+    if env_type == "dexjoco":
+        # DexJoCo (pure MuJoCo + Gymnasium) low-dim task. Mirrors the pusht
+        # branch: the env is created lazily through the wrappers
+        # (dexjoco_lowdim + multi_step), so no concrete env is built here.
+        from env.gym_utils.async_vector_env import AsyncVectorEnv
+        from env.gym_utils.sync_vector_env import SyncVectorEnv
+
+        def _make_dexjoco_env():
+            env = None
+            if wrappers is not None:
+                from env.gym_utils.wrapper import wrapper_dict
+                for wrapper, args in wrappers.items():
+                    env = wrapper_dict[wrapper](env, **args)
+            return env
+
+        env_fns = [_make_dexjoco_env for _ in range(num_envs)]
+
+        # State-only observations -> no dummy_env_fn needed (the vector env
+        # introspects spaces from a real sub-env), matching pusht state mode.
+        return (
+            AsyncVectorEnv(env_fns)
+            if asynchronous
+            else SyncVectorEnv(env_fns)
+        )
+
     if env_type == "furniture":
         from furniture_bench.envs.observation import DEFAULT_STATE_OBS
         from furniture_bench.envs.furniture_rl_sim_env import FurnitureRLSimEnv
