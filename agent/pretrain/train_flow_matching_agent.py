@@ -15,7 +15,7 @@ class TrainFlowMatchingAgent(PreTrainAgent):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.max_episode_steps = cfg.env.max_episode_steps
-        self.val_freq = 100
+        self.val_freq = cfg.train.get("val_freq", 100)  # honor config (was hard-coded 100)
 
 
     def run(self):
