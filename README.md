@@ -44,6 +44,65 @@ Download all checkpoints and datasets from Hugging Face with the following comma
 ```console
 bash script/download_hf.sh
 ```
+
+### Dexjoco image datasets
+
+The six-task image release is hosted at
+[robopark/dexjoco-image-data](https://huggingface.co/datasets/robopark/dexjoco-image-data).
+The repository is private; use a Hugging Face account/token with read access.
+Authenticate with `python -c 'from huggingface_hub import login; login()'` or
+provide `HF_TOKEN` through your environment. Do not put tokens in source files.
+
+From the repository root, with the Python environment activated:
+
+```bash
+export DICE_RL_DATA_DIR="$PWD/data_dir"
+bash script/download_hf.sh dexjoco
+
+# Or download only selected tasks:
+bash script/download_hf.sh dexjoco --task hammer_nail --task bimanual_hanoi
+```
+
+The tasks are `hammer_nail`, `pick_bucket`, `fold_glasses`,
+`bimanual_assembly`, `bimanual_hanoi`, and `bimanual_microwave_cook`.
+The downloader resolves one HF commit for the entire download, checks each
+archive's SHA-256, and installs complete task directories atomically. Record the
+printed commit hash, or supply `--revision <commit>` to reproduce a release.
+Use `--data-dir /path/to/data` to override `DICE_RL_DATA_DIR`, and `--cache-dir`
+to choose where downloaded archives are cached. Allow disk space for both the
+cached archives and extracted data. Existing local datasets without a matching
+download receipt are preserved; use another data directory to download a fresh
+copy. Repeating a completed download reuses its installation receipt; it does
+not re-audit locally edited image chunks.
+
+```text
+data_dir/dexjoco/{task}-img/
+├── episodes.json
+├── images.zarr/                 # all recorded cameras, RGB uint8, 96×96
+├── ph_pretrain/
+│   ├── train.npz
+│   └── normalization.npz
+└── ph_finetune/
+    ├── train.npz
+    └── normalization.npz
+```
+
+Keep each task directory together: both NPZ files reference `../images.zarr`.
+Image BC uses 23-dimensional proprioception and 22-dimensional actions for
+single-arm tasks, or 46-dimensional proprioception and 44-dimensional actions
+for bimanual tasks. Select cameras explicitly with `train_dataset.image_keys`;
+match the model's `num_img` and image shape to that ordered selection.
+The finetuning files assign a synthetic terminal reward to every retained
+episode; they do not certify recorded task success.
+
+See [the server setup notes](docs/dexjoco-server-handoff.md) for
+data-loader configuration and remaining BC
+trainer integration work. These are datasets; trained Dexjoco checkpoints are
+not part of this release. The no-argument download command above continues to
+download the original Robomimic datasets and checkpoints.
+
+### Robomimic download layout
+
 The dowloaded datasets have the following structure:
 ```
 data_dir/

@@ -1,7 +1,8 @@
 """DexJoCo actions in world coordinates; all pose quaternions use wxyz.
 
-Delta actions contain measured-to-target translation and rotation, followed by
-16 absolute hand targets. Rotation increments left-multiply the measured pose.
+Actions carry the measured-to-target translation and rotation, followed by 16
+absolute hand targets. Rotation increments left-multiply the measured pose, so
+both encoding and decoding need the state the command was issued against.
 """
 
 import numpy as np
@@ -29,11 +30,6 @@ def _rotation(pose):
     return Rotation.from_quat(quaternion[:, [1, 2, 3, 0]])
 
 
-def _mode(action_mode):
-    if action_mode not in ("delta", "absolute"):
-        raise ValueError(f"Unsupported action mode: {action_mode}")
-
-
 def _observed(states, shape):
     states = _array(states, 23, "states", minimum=True)
     if states.shape[:-1] != shape:
@@ -41,35 +37,24 @@ def _observed(states, shape):
     return states
 
 
-def encode_actions(states, targets, action_mode="delta"):
-    """Encode (..., 23) absolute quaternion targets as (..., 22) actions."""
-    _mode(action_mode)
+def encode_actions(states, targets):
+    """Encode (..., 23) absolute quaternion targets as (..., 22) delta actions."""
     targets = _array(targets, 23, "targets")
     shape = targets.shape[:-1]
-    rotation = _rotation(targets)
-    position = targets[..., :3]
-    if action_mode == "delta":
-        states = _observed(states, shape)
-        position = position - states[..., :3]
-        rotation = rotation * _rotation(states).inv()
+    states = _observed(states, shape)
+    position = targets[..., :3] - states[..., :3]
+    rotation = _rotation(targets) * _rotation(states).inv()
     rotvec = rotation.as_rotvec().reshape(shape + (3,))
     return np.concatenate([position, rotvec, targets[..., 7:]], axis=-1)
 
 
-def decode_actions(states, actions, action_mode="delta"):
-    """Recover (..., 23) absolute targets using the latest measured state.
-
-    states may be None in absolute mode, which requires no reference pose.
-    """
-    _mode(action_mode)
+def decode_actions(states, actions):
+    """Recover (..., 23) absolute targets using the latest measured state."""
     actions = _array(actions, 22, "actions")
     shape = actions.shape[:-1]
-    position = actions[..., :3]
-    rotation = Rotation.from_rotvec(actions[..., 3:6].reshape(-1, 3))
-    if action_mode == "delta":
-        states = _observed(states, shape)
-        position = states[..., :3] + position
-        rotation = rotation * _rotation(states)
+    states = _observed(states, shape)
+    position = states[..., :3] + actions[..., :3]
+    rotation = Rotation.from_rotvec(actions[..., 3:6].reshape(-1, 3)) * _rotation(states)
     quaternion = rotation.as_quat()[:, [3, 0, 1, 2]].reshape(shape + (4,))
     return np.concatenate([position, quaternion, actions[..., 6:]], axis=-1)
 

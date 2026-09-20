@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Dexjoco contains shared Zarr image archives and needs its own installation
+# layout. Keep the existing no-argument Robomimic download behavior below.
+if [[ "${1:-}" == "dexjoco" ]]; then
+    shift
+    SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    exec python "$SCRIPT_DIR/download_dexjoco.py" "$@"
+fi
+
 # Downloads Robomimic datasets/checkpoints from Hugging Face into the expected local layout.
 #
 # Expected HF repos:

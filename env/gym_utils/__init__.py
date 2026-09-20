@@ -137,6 +137,73 @@ def make_async(
             else SyncVectorEnv(env_fns)
         )
     
+    if env_type == "dexjoco":
+        # DexJoCo (pure MuJoCo + Gymnasium) image task -- the demonstrations
+        # carry no object state, so policies are trained from camera frames.
+        # Mirrors the pusht branch: the env is created lazily through the
+        # wrappers (dexjoco_image + multi_step), so nothing concrete is built
+        # here.
+        from env.gym_utils.async_vector_env import AsyncVectorEnv
+        from env.gym_utils.sync_vector_env import SyncVectorEnv
+
+        def _make_dexjoco_env():
+            env = None
+            if wrappers is not None:
+                from env.gym_utils.wrapper import wrapper_dict
+                for wrapper, args in wrappers.items():
+                    env = wrapper_dict[wrapper](env, **args)
+            return env
+
+        def dummy_dexjoco_env_fn():
+            import gym
+            import numpy as np
+            from gym import spaces
+            from env.gym_utils.wrapper.multi_step import MultiStep
+
+            if shape_meta is None:
+                raise ValueError(
+                    "DexJoCo envs are image-based and need shape_meta to build their spaces"
+                )
+
+            env = gym.Env()
+            observation_space = spaces.Dict()
+            for key, value in shape_meta["obs"].items():
+                shape = tuple(value["shape"])
+                if key.endswith("rgb"):
+                    # uint8 frames, matching DexjocoImageWrapper's own space:
+                    # the workers write into buffers allocated from this one.
+                    observation_space[key] = spaces.Box(
+                        low=0, high=255, shape=shape, dtype=np.uint8
+                    )
+                elif key.endswith("state"):
+                    observation_space[key] = spaces.Box(
+                        low=-1, high=1, shape=shape, dtype=np.float32
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported type {key}")
+            env.observation_space = observation_space
+            env.action_space = spaces.Box(
+                -1, 1, shape=(action_dim,), dtype=np.float32
+            )
+            env.metadata = {
+                "render.modes": ["rgb_array"],
+                "video.frames_per_second": 30,
+            }
+
+            if wrappers is not None and "multi_step" in wrappers:
+                return MultiStep(
+                    env=env, n_obs_steps=wrappers["multi_step"]["n_obs_steps"]
+                )
+            return env
+
+        env_fns = [_make_dexjoco_env for _ in range(num_envs)]
+
+        return (
+            AsyncVectorEnv(env_fns, dummy_env_fn=dummy_dexjoco_env_fn)
+            if asynchronous
+            else SyncVectorEnv(env_fns)
+        )
+
     if env_type == "furniture":
         from furniture_bench.envs.observation import DEFAULT_STATE_OBS
         from furniture_bench.envs.furniture_rl_sim_env import FurnitureRLSimEnv
