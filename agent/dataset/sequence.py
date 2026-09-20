@@ -6,6 +6,7 @@ No normalization is applied here --- we always normalize the data when pre-proce
 """
 
 from collections import namedtuple
+from pathlib import Path
 import numpy as np
 import torch
 import logging
@@ -47,6 +48,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         device="cuda:0",
         use_6d_rot=False,  # New parameter for 6D rotation
         abs_action=False,  # Whether to use absolute action mode
+        image_keys=None,  # Ordered camera names for named DexJoCo image archives
     ):
         assert (
             img_cond_steps <= cond_steps
@@ -112,10 +114,20 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         log.info(f"States shape/type: {self.states.shape, self.states.dtype}")
         log.info(f"Actions shape/type: {self.actions.shape, self.actions.dtype}")
         if self.use_img:
-            self.images = torch.from_numpy(dataset["images"][:total_num_steps]).to(
-                device
-            )  # (total_num_steps, C, H, W)
+            if "image_store" in dataset:
+                from agent.dataset.camera_images import CameraImages
+
+                self.images = CameraImages(
+                    Path(dataset_path).parent / str(dataset["image_store"].item()),
+                    image_keys, total_num_steps, device,
+                )
+            else:
+                if image_keys is not None:
+                    raise ValueError("image_keys requires a named camera archive")
+                self.images = torch.from_numpy(dataset["images"][:total_num_steps]).to(device)
             log.info(f"Images shape/type: {self.images.shape, self.images.dtype}")
+        if isinstance(dataset, np.lib.npyio.NpzFile):
+            dataset.close()
 
     def __getitem__(self, idx):
         """
@@ -133,10 +145,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         )  # more recent is at the end
         conditions = {"state": states}
         if self.use_img:
-            images = self.images[(start - num_before_start) : end]
+            image_start = max(start - num_before_start, start - self.img_cond_steps + 1)
+            images = self.images[image_start : start + 1]
             images = torch.stack(
                 [
-                    images[max(num_before_start - t, 0)]
+                    images[max(start - image_start - t, 0)]
                     for t in reversed(range(self.img_cond_steps))
                 ]
             )
@@ -396,13 +409,15 @@ class StitchedSequenceQLearningDataset(StitchedSequenceDataset):
         )  # more recent is at the end
         conditions = {"state": states, "next_state": next_states}
         if self.use_img:
-            # Extract images exactly like states
-            images = self.images[(start - num_before_start) : (start + 1)]
+            # Bound disk reads to the actual history, preserving prefix padding.
+            image_start = max(start - num_before_start, start - self.img_cond_steps + 1)
+            image_history = start - image_start
+            images = self.images[image_start : start + 1]
             
             # Extract next images exactly like next_states
             if idx < len(self.indices) - self.horizon_steps:
                 next_images = self.images[
-                    (start - num_before_start + self.horizon_steps) : start
+                    (image_start + self.horizon_steps) : start
                     + 1
                     + self.horizon_steps
                 ]
@@ -413,13 +428,13 @@ class StitchedSequenceQLearningDataset(StitchedSequenceDataset):
             # Stack images history exactly like states
             images = torch.stack(
                 [
-                    images[max(num_before_start - t, 0)]
+                    images[max(image_history - t, 0)]
                     for t in reversed(range(self.img_cond_steps))
                 ]
             )
             next_images = torch.stack(
                 [
-                    next_images[max(num_before_start - t, 0)]
+                    next_images[max(image_history - t, 0)]
                     for t in reversed(range(self.img_cond_steps))
                 ]
             )

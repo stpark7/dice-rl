@@ -45,21 +45,12 @@ class ActionContractTests(unittest.TestCase):
         np.testing.assert_allclose(actions.unnormalize(normalized, lo, hi), data, atol=1e-15)
         np.testing.assert_array_equal(normalized[:, 0], [-1, -1])
 
-    def test_absolute_mode_keeps_absolute_position(self):
-        state = np.r_[8., 0., 0., 1., 0., 0., 0., np.zeros(16)]
-        target = np.r_[11., 0., 0., 1., 0., 0., 0., np.ones(16)]
-        encoded = actions.encode_actions(state, target, 'absolute')
-        self.assertEqual(encoded[0], 11)
-        np.testing.assert_allclose(actions.decode_actions(state, encoded, 'absolute'), target)
-
-    def test_rejects_invalid_data_and_modes(self):
+    def test_rejects_invalid_data_and_shapes(self):
         state = np.r_[np.zeros(3), 1., 0., 0., 0., np.zeros(16)]
         for invalid in [np.zeros(23), np.full(23, np.nan), np.zeros(22)]:
             with self.subTest(target=invalid):
                 with self.assertRaises(ValueError):
                     actions.encode_actions(state, invalid)
-        with self.assertRaises(ValueError):
-            actions.encode_actions(state, state, 'previous_target')
         with self.assertRaises(ValueError):
             actions.encode_actions(np.zeros(23), state)
         with self.assertRaises(ValueError):

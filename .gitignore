@@ -15,6 +15,7 @@ hf_release/
 # IDE and tools
 .vscode/
 .github/
+/.local/cleanup/
 
 # Project-specific files
 *.pkl
@@ -59,6 +60,7 @@ share/python-wheels/
 # Virtual environments
 .env
 .venv
+.venv-*/
 venv/
 ENV/
 env.bak/
