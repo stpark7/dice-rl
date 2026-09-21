@@ -19,10 +19,11 @@ bridged here:
      what the demonstrations actually contain.  Values are normalized to
      [-1, 1] with stats from `normalization.npz`.
 
-  3. Action: the policy emits 22D measured-pose delta arm actions; the 16 hand
-     targets stay absolute. Delta translation is in world coordinates and delta
-     rotation left-multiplies the latest measured orientation. Every step
-     decodes an absolute 23D quaternion target.
+  3. Action: the policy emits 22D per-arm measured-pose delta actions; the 16
+     hand targets stay absolute. Delta translation is in world coordinates and
+     delta rotation left-multiplies each arm's latest measured orientation.
+     Single-arm actions decode to 23D targets. Bimanual 44D actions decode to
+     [right_pose7, left_pose7, right_hand16, left_hand16] for DualArmPolicyWrapper.
 
 `dexjoco` itself is imported lazily inside `__init__` so that importing this
 module (and the wrapper registry) never requires DexJoCo to be installed.
@@ -34,11 +35,11 @@ import imageio
 from gym import spaces
 from PIL import Image
 
-from util.dexjoco_actions import decode_actions, unnormalize
+from util.dexjoco_actions import decode_actions, decode_bimanual_actions, unnormalize
 
 
 # DexJoCo renames the third-person camera when domain randomization is on.
-CAMERA_ALIASES = {"front": "random_camera"}
+CAMERA_ALIASES = {"front": "random_camera", "ego": "random_camera"}
 
 DEFAULT_IMAGE_KEYS = ("front", "wrist")
 DEFAULT_LOW_DIM_KEYS = ("tcp_pose", "gripper_pose")
@@ -88,16 +89,16 @@ class DexjocoImageWrapper(gym.Env):
         if env is None:
             from dexjoco.tasks.mappings import CONFIG_MAPPING
 
-            # Stock DexJoCo forwards unknown keywords straight to the task env,
-            # so image observations are requested explicitly: a task that cannot
-            # render them fails loudly instead of silently handing the policy a
-            # state-only observation.
+            # Hammer Nail always emits camera observations and does not accept
+            # image_obs. Other tasks need it explicitly enabled. Missing camera
+            # frames are still rejected when observations are processed.
+            image_kwargs = {} if task_name == "hammer_nail" else {"image_obs": True}
             try:
                 self.env = CONFIG_MAPPING[task_name]().get_environment(
                     policy_mode=policy_mode,
                     render_mode=render_mode,
                     randomize=randomize,
-                    image_obs=True,
+                    **image_kwargs,
                 )
             except TypeError as error:
                 raise TypeError(
@@ -150,10 +151,22 @@ class DexjocoImageWrapper(gym.Env):
                 )
             action_dim = int(self.action_min.shape[0])
         else:
-            action_dim = 22
+            action_dim = int(shape_meta.get("action", {"shape": [22]})["shape"][0])
+
+        if action_dim not in (22, 44):
+            raise ValueError(f"DexJoCo actions must have 22 or 44 dimensions, got {action_dim}")
+        if "action" in shape_meta and tuple(shape_meta["action"]["shape"]) != (action_dim,):
+            raise ValueError(
+                f"shape_meta action shape {shape_meta['action']['shape']} does not "
+                f"match the {action_dim}-dim dataset actions"
+            )
+        self.action_dim = action_dim
 
         # Which columns of the flattened state the policy actually sees.
         self._state_index = self._resolve_state_index()
+        # Decode against raw proprioception, independently of the policy's
+        # selected/normalized state and of object fields in the observation.
+        self._action_state_index = self._resolve_action_state_index()
 
         # Action space: normalized rotvec action in [-1, 1].
         self.action_space = spaces.Box(
@@ -177,10 +190,8 @@ class DexjocoImageWrapper(gym.Env):
     # ------------------------------------------------------------------ #
     # Observation assembly.
     # ------------------------------------------------------------------ #
-    def _resolve_state_index(self):
-        """Indices of the selected proprio keys inside the flattened state."""
-        if self.low_dim_keys is None:
-            return None
+    def _proprio_indices(self, selected_keys):
+        """Locate named fields in DexJoCo's flattened observation."""
         keys = getattr(self.env, "proprio_keys", None)
         space = getattr(self.env, "proprio_space", None)
         if keys is None or space is None:
@@ -194,17 +205,39 @@ class DexjocoImageWrapper(gym.Env):
             size = int(np.prod(space[key].shape))
             spans[key] = (start, start + size)
             start += size
-        unknown = [key for key in self.low_dim_keys if key not in spans]
+        unknown = [key for key in selected_keys if key not in spans]
         if unknown:
             raise ValueError(
                 f"Unknown proprio keys {unknown}; task {self.task_name!r} exposes {list(spans)}"
             )
-        index = np.concatenate([np.arange(*spans[key]) for key in self.low_dim_keys])
+        return np.concatenate([np.arange(*spans[key]) for key in selected_keys])
+
+    def _resolve_state_index(self):
+        """Indices of the selected proprio keys inside the flattened state."""
+        if self.low_dim_keys is None:
+            return None
+        index = self._proprio_indices(self.low_dim_keys)
         if index.shape[0] != self.state_dim:
             raise ValueError(
                 f"low_dim_keys {self.low_dim_keys} give a {index.shape[0]}-dim state "
                 f"but shape_meta declares {self.state_dim}"
             )
+        return index
+
+    def _resolve_action_state_index(self):
+        space = getattr(self.env, "proprio_space", None)
+        if space is None or getattr(self.env, "proprio_keys", None) is None:
+            # With no adapter metadata, require the raw state to start with
+            # the canonical single-arm/bimanual proprioception layout.
+            return None
+        index = self._proprio_indices(DEFAULT_LOW_DIM_KEYS)
+        n_arms = self.action_dim // 22
+        for key, width in zip(DEFAULT_LOW_DIM_KEYS, (7 * n_arms, 16 * n_arms)):
+            if int(np.prod(space[key].shape)) != width:
+                raise ValueError(
+                    f"{self.action_dim}-dim actions require {key} with {width} "
+                    f"values, got shape {space[key].shape}"
+                )
         return index
 
     def _camera_frame(self, raw_obs, key):
@@ -241,7 +274,13 @@ class DexjocoImageWrapper(gym.Env):
         """Decode the delta action while preserving absolute hand targets."""
         if self._raw_state is None:
             raise RuntimeError("Reset the environment before applying delta actions")
-        return decode_actions(self._raw_state, action).astype(np.float32)
+        state = (
+            self._raw_state
+            if self._action_state_index is None
+            else self._raw_state[self._action_state_index]
+        )
+        decode = decode_bimanual_actions if self.action_dim == 44 else decode_actions
+        return decode(state, action).astype(np.float32)
 
     def get_observation(self, raw_obs):
         """Stack the configured cameras and slice out the policy's state."""
@@ -298,7 +337,10 @@ class DexjocoImageWrapper(gym.Env):
         return self.get_observation(raw_obs)
 
     def step(self, action):
-        """Step the environment with a normalized 22-dim rotvec action."""
+        """Step with normalized 22D single-arm or 44D bimanual actions."""
+        action = np.asarray(action)
+        if action.shape != (self.action_dim,):
+            raise ValueError(f"Expected action shape ({self.action_dim},), got {action.shape}")
         if self.normalize:
             action = self.unnormalize_action(action)
         env_action = self._rotvec_action_to_env_action(action)

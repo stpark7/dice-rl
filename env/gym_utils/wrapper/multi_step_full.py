@@ -83,9 +83,9 @@ class MultiStepFull(MultiStep):
         terminated = False
         # Execute action chunk (mirroring parent's logic)
         for act_step, act in enumerate(action):
-            self.cnt += 1
             if terminated or truncated:
                 break
+            self.cnt += 1
 
             # Step environment (gym returns 4 values, not 5 like gymnasium)
             observation, reward, done, info = self.env.step(act)
@@ -107,6 +107,10 @@ class MultiStepFull(MultiStep):
             else:
                 truncated = info["TimeLimit.truncated"]
                 terminated = done
+            # A false environment truncation flag must not disable our own
+            # rollout budget (DexJoCo supplies this flag on every step).
+            if not terminated and self.max_episode_steps is not None:
+                truncated = truncated or self.cnt >= self.max_episode_steps
             done = truncated or terminated
             # Store done flag for full trajectory
             step_dones.append(done)
@@ -137,4 +141,3 @@ class MultiStepFull(MultiStep):
             observation = self.reset()
                     
         return observation, reward, terminated, truncated, info
-    

@@ -190,6 +190,10 @@ def make_async(
                 "video.frames_per_second": 30,
             }
 
+            if wrappers is not None and "multi_step_full" in wrappers:
+                from env.gym_utils.wrapper.multi_step_full import MultiStepFull
+
+                return MultiStepFull(env=env, **wrappers["multi_step_full"])
             if wrappers is not None and "multi_step" in wrappers:
                 return MultiStep(
                     env=env, n_obs_steps=wrappers["multi_step"]["n_obs_steps"]

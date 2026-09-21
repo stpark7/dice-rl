@@ -183,6 +183,9 @@ class AsyncVectorEnv(VectorEnv):
                 self.single_observation_space, n=self.num_envs, fn=np.zeros
             )
 
+        # Keep synchronized arrays (and their semaphores) alive while spawned
+        # workers unpickle them; NumPy observation views only retain raw storage.
+        self._obs_buffer = _obs_buffer
         self.parent_pipes, self.processes = [], []
         self.error_queue = ctx.Queue()
         target = _worker_shared_memory if self.shared_memory else _worker

@@ -227,6 +227,7 @@ class StitchedSequenceQLearningDataset(StitchedSequenceDataset):
         self.horizon_steps = kwargs.get('horizon_steps', 8)
         traj_lengths = dataset["traj_lengths"][:max_n_episodes]
         self.traj_lengths = traj_lengths
+        self.episode_ends = np.cumsum(traj_lengths)
         total_num_steps = np.sum(traj_lengths)
 
         # discount factor
@@ -322,122 +323,47 @@ class StitchedSequenceQLearningDataset(StitchedSequenceDataset):
 
     def __getitem__(self, idx):
         start, num_before_start = self.indices[idx]
-        end = start + self.horizon_steps
-        states = self.states[(start - num_before_start) : (start + 1)]
-        actions = self.actions[start:end]
-        
-        # Handle n-step returns if enabled (matching _sample_standard logic)
-        if self.use_n_step and self.n_step > 1:
-            # Compute n-step rewards (matching replay_buffer.py lines 215-227)
-            n_step_rewards = 0.0
-            n_step_dones = False
-            
-            for step in range(self.n_step):
-                chunk_start = start + step * self.horizon_steps
-                chunk_end = chunk_start + self.horizon_steps
-                
-                # Safely check bounds
-                if chunk_end > len(self.rewards):
-                    break
-                
-                # Get rewards and dones for this chunk
-                horizon_rewards = self.rewards[chunk_start:chunk_end]
-                horizon_dones = self.dones[chunk_start:chunk_end]
-                
-                # Aggregate rewards within this horizon chunk
-                chunk_reward = 0.0
-                for t in range(self.horizon_steps):
-                    if t < len(horizon_rewards):
-                        chunk_reward += horizon_rewards[t]
-                        
-                        # Stop accumulating within chunk if done
-                        if horizon_dones[t] and t < self.horizon_steps - 1:
-                            break
-                
-                # Add this chunk's reward with n-step discounting
-                n_step_rewards += (self.gamma ** step) * chunk_reward * (not n_step_dones)
-                
-                # Mark as done if any step in this chunk is done
-                n_step_dones = n_step_dones or horizon_dones.any()
-            
-            rewards = torch.tensor([n_step_rewards], device=self.device)
-            dones = torch.tensor([n_step_dones], device=self.device, dtype=torch.float32)
-            
-        else:
-            # Original single-step logic (keep unchanged)
-            horizon_rewards = self.rewards[start:end]
-            horizon_dones = self.dones[start:end]
-            
-            # Compute aggregated reward (sum with or without discounting)
-            aggregated_reward = 0.0
-            for t in range(self.horizon_steps):
-                aggregated_reward += horizon_rewards[t]
-                
-                # If episode ends at step t, don't include future rewards
-                if horizon_dones[t] and t < self.horizon_steps - 1:
-                    break
-                    
-            rewards = aggregated_reward.unsqueeze(0) if isinstance(aggregated_reward, torch.Tensor) else torch.tensor([aggregated_reward], device=self.device)
+        episode_start = start - num_before_start
+        episode_index = np.searchsorted(self.episode_ends, start, side="right")
+        episode_end = int(self.episode_ends[episode_index])
+        actions = self.actions[start : start + self.horizon_steps]
 
-            # Done flag is from checking if any done in horizon
-            dones = horizon_dones.any().unsqueeze(0).float()
-            
+        # Discount once per action chunk, matching online replay. Stop at the
+        # episode boundary even when the final n-step chunk is shorter than H.
+        num_chunks = self.n_step if self.use_n_step else 1
+        rewards = torch.zeros(1, device=self.device)
+        dones = torch.zeros(1, device=self.device)
+        next_start = start
+        for step in range(num_chunks):
+            chunk_start = start + step * self.horizon_steps
+            chunk_end = min(chunk_start + self.horizon_steps, episode_end)
+            terminal = torch.nonzero(self.dones[chunk_start:chunk_end]).flatten()
+            if len(terminal):
+                chunk_end = chunk_start + int(terminal[0]) + 1
+                dones.fill_(1)
+            rewards += self.gamma ** step * self.rewards[chunk_start:chunk_end].sum()
+            next_start = chunk_end
+            if dones.item() or chunk_end == episode_end:
+                break
 
-        # Account for action horizon
-        if idx < len(self.indices) - self.horizon_steps:
-            next_states = self.states[
-                (start - num_before_start + self.horizon_steps) : start
-                + 1
-                + self.horizon_steps
-            ]  # even if this uses the first state(s) of the next episode, done=True will prevent bootstrapping. We have already filtered out cases where done=False but end of episode (truncation).
-        else:
-            # prevents indexing error, but ignored since done=True
-            next_states = torch.zeros_like(states)
+        def history(values, current, count):
+            first = max(episode_start, current - count + 1)
+            frames = values[first : current + 1]
+            return torch.stack([
+                frames[max(current - first - t, 0)]
+                for t in reversed(range(count))
+            ])
 
-        # stack obs history
-        states = torch.stack(
-            [
-                states[max(num_before_start - t, 0)]
-                for t in reversed(range(self.cond_steps))
-            ]
-        )  # more recent is at the end
-        next_states = torch.stack(
-            [
-                next_states[max(num_before_start - t, 0)]
-                for t in reversed(range(self.cond_steps))
-            ]
-        )  # more recent is at the end
+        states = history(self.states, start, self.cond_steps)
+        # Terminal observations are not in this archive; zero placeholders are
+        # safe because done masks bootstrapping. Never read the next episode.
+        next_states = (torch.zeros_like(states) if dones.item() else
+                       history(self.states, next_start, self.cond_steps))
         conditions = {"state": states, "next_state": next_states}
         if self.use_img:
-            # Bound disk reads to the actual history, preserving prefix padding.
-            image_start = max(start - num_before_start, start - self.img_cond_steps + 1)
-            image_history = start - image_start
-            images = self.images[image_start : start + 1]
-            
-            # Extract next images exactly like next_states
-            if idx < len(self.indices) - self.horizon_steps:
-                next_images = self.images[
-                    (image_start + self.horizon_steps) : start
-                    + 1
-                    + self.horizon_steps
-                ]
-            else:
-                # prevents indexing error, but ignored since done=True
-                next_images = torch.zeros_like(images)
-            
-            # Stack images history exactly like states
-            images = torch.stack(
-                [
-                    images[max(image_history - t, 0)]
-                    for t in reversed(range(self.img_cond_steps))
-                ]
-            )
-            next_images = torch.stack(
-                [
-                    next_images[max(image_history - t, 0)]
-                    for t in reversed(range(self.img_cond_steps))
-                ]
-            )
+            images = history(self.images, start, self.img_cond_steps)
+            next_images = (torch.zeros_like(images) if dones.item() else
+                           history(self.images, next_start, self.img_cond_steps))
             conditions["rgb"] = images
             conditions["next_rgb"] = next_images
         if self.get_mc_return:

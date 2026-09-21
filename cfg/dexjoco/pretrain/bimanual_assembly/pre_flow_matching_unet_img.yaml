@@ -1,0 +1,129 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.pretrain.train_flow_matching_img_agent.TrainFlowMatchingImgAgent
+
+name: ${env_name}_pre_flow_matching_unet_img_ta${horizon_steps}_td${flow_steps}
+logdir: ${oc.env:DICE_RL_LOG_DIR}/dexjoco-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: ${oc.env:DICE_RL_DATA_DIR}/dexjoco/${env_name}-img/ph_pretrain/train.npz
+normalization_path: ${oc.env:DICE_RL_DATA_DIR}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: bimanual_assembly
+obs_dim: 46
+action_dim: 44
+use_6d_rot: false
+abs_action: false
+flow_steps: 10
+horizon_steps: 8
+cond_steps: 1
+img_cond_steps: 1
+act_steps: 8
+
+env:
+  n_envs: 10
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  # BC max traj_lengths=895, rounded up to a multiple of 100.
+  # Source: robopark/dexjoco-image-data@68a239b1ddabe7228026f94ce57845d10f7d98f2 manifest.json.
+  max_episode_steps: 900
+  save_video: false
+  use_image_obs: true
+  env_type: dexjoco
+  wrappers:
+    dexjoco_image:
+      normalization_path: ${normalization_path}
+      low_dim_keys: [tcp_pose, gripper_pose]
+      image_keys: [ego, wrist_left, wrist_right]
+      shape_meta: ${shape_meta}
+      task_name: ${env_name}
+      policy_mode: true
+      randomize: false
+      render_mode: rgb_array
+      realtime: false
+      max_episode_steps: ${env.max_episode_steps}
+      success_steps_before_termination: 1
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [96, 96, 9]
+    state:
+      shape: [46]
+  action:
+    shape: [44]
+
+wandb:
+  project: dexjoco-${env_name}-pretrain
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_epochs: 8000
+  batch_size: 512
+  learning_rate: 1e-4
+  weight_decay: 1e-6
+  lr_scheduler:
+    first_cycle_steps: 5000
+    warmup_steps: 100
+    min_lr: 1e-5
+  epoch_start_ema: 20
+  update_ema_freq: 10
+  save_model_freq: 200
+  render:
+    freq: 2
+    num: 0
+
+model:
+  _target_: model.flow_matching.flow_matching.FlowMatchingModel
+  network:
+    _target_: model.flow_matching.vision_resnet_mlp_flow_matching.VisionResNetFlowMatchingMLP
+    num_img: 3
+    spatial_emb: 64
+    time_dim: 64
+    dropout: 0.1
+    visual_feature_dim: 128
+    fused_feature_dim: 128
+    img_cond_steps: ${img_cond_steps}
+    cond_dim: 46
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    img_height: 96
+    img_width: 96
+    num_kp: 32
+    unet_base_channels: 128
+    unet_channel_mults: [1, 2, 2]
+    use_augmentation: true
+    crop_height: 84
+    crop_width: 84
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  flow_steps: ${flow_steps}
+  integration_method: euler
+  schedule: linear
+  t_sampling: uniform
+  weight_method: none
+  device: ${device}
+
+ema:
+  decay: 0.995
+
+train_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceDataset
+  use_img: true
+  dataset_path: ${train_dataset_path}
+  horizon_steps: ${horizon_steps}
+  max_n_episodes: 50
+  cond_steps: ${cond_steps}
+  img_cond_steps: ${img_cond_steps}
+  # Keep image data on CPU; the trainer transfers each batch to the GPU.
+  device: cpu
+  image_keys: ${env.wrappers.dexjoco_image.image_keys}
