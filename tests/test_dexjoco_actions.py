@@ -45,6 +45,40 @@ class ActionContractTests(unittest.TestCase):
         np.testing.assert_allclose(actions.unnormalize(normalized, lo, hi), data, atol=1e-15)
         np.testing.assert_array_equal(normalized[:, 0], [-1, -1])
 
+    def test_bimanual_batched_world_rotations_and_policy_target_order(self):
+        observed = Rotation.from_euler('xyz', [[.7, -.8, .4], [1.1, .3, -.5]])
+        increments = Rotation.from_rotvec([[.3, .2, -.1], [-.2, .4, .1]])
+        right_pose = np.r_[[1, 2, 3], wxyz(observed[0])]
+        left_pose = np.r_[[4, 5, 6], wxyz(observed[1])]
+        state = np.r_[right_pose, left_pose, np.zeros(32), 99.]
+        command = np.r_[[.1, .2, .3], increments[0].as_rotvec(), np.full(16, .7),
+                        [-.4, -.5, -.6], increments[1].as_rotvec(), np.full(16, -.8)]
+        states = np.broadcast_to(state, (2, 3, len(state)))
+        commands = np.broadcast_to(command, (2, 3, 44))
+        targets = actions.decode_bimanual_actions(states, commands)
+        self.assertEqual(targets.shape, (2, 3, 46))
+        expected = np.r_[[1.1, 2.2, 3.3], wxyz(increments[0] * observed[0]),
+                         [3.6, 4.5, 5.4], wxyz(increments[1] * observed[1]),
+                         np.full(16, .7), np.full(16, -.8)]
+        np.testing.assert_allclose(targets, np.broadcast_to(expected, targets.shape), atol=1e-12)
+
+    def test_bimanual_rejects_invalid_shapes_and_either_invalid_quaternion(self):
+        state = np.r_[np.zeros(3), 1., np.zeros(6), 1., np.zeros(35)]
+        for invalid_state, invalid_action in [
+            (state[:23], np.zeros(44)),
+            (state, np.zeros(22)),
+            (np.stack([state, state]), np.zeros(44)),
+            (state, np.full(44, np.nan)),
+        ]:
+            with self.subTest(state_shape=invalid_state.shape, action_shape=invalid_action.shape):
+                with self.assertRaises(ValueError):
+                    actions.decode_bimanual_actions(invalid_state, invalid_action)
+        for quaternion_start in (3, 10):
+            invalid = state.copy()
+            invalid[quaternion_start:quaternion_start + 4] = 0
+            with self.assertRaisesRegex(ValueError, 'zero norm'):
+                actions.decode_bimanual_actions(invalid, np.zeros(44))
+
     def test_rejects_invalid_data_and_shapes(self):
         state = np.r_[np.zeros(3), 1., 0., 0., 0., np.zeros(16)]
         for invalid in [np.zeros(23), np.full(23, np.nan), np.zeros(22)]:

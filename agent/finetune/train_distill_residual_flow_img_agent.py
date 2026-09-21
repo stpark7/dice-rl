@@ -250,8 +250,8 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             # Create processed transitions with merged features
             for j, transition in enumerate(batch_transitions):
                 # Get original state (for concatenation with visual features)
-                original_state = transition.conditions['state']  # (cond_steps, obs_dim)
-                original_next_state = transition.conditions.get('next_state', original_state)
+                original_state = states_tensor[j]  # On the feature extraction device
+                original_next_state = next_states_tensor[j]
                 
                 # Merge visual features with original state
                 # The merged_features already contains processed visual+state, but we need to 
@@ -476,4 +476,3 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             action_venv = output_venv[:, :self.act_steps]
             
             return action_venv
-    

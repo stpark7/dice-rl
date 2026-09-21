@@ -30,7 +30,7 @@ class TrainAgent:
         torch.manual_seed(self.seed)
         
         # CUDA deterministic settings
-        if torch.cuda.is_available():
+        if str(self.device).startswith("cuda") and torch.cuda.is_available():
             torch.cuda.manual_seed(self.seed)
             torch.cuda.manual_seed_all(self.seed)
             torch.backends.cudnn.deterministic = True

@@ -312,6 +312,15 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(dataset["states"].shape, (18, 46))
             self.assertEqual(dataset["actions"].shape, (18, 44))
             np.testing.assert_allclose(dataset["actions"][2:, 22], 0.02, atol=1e-7)
+            from util.dexjoco_actions import decode_bimanual_actions
+            restored = decode_bimanual_actions(dataset["states"], dataset["actions"])
+            # Recordings use [right23, left23]; policy_mode expects poses first.
+            retained = targets[14:]
+            expected = np.concatenate(
+                [retained[:, :7], retained[:, 23:30], retained[:, 7:23], retained[:, 30:]],
+                axis=1,
+            )
+            np.testing.assert_allclose(restored, expected, atol=1e-7)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import unittest
 
 import numpy as np
 from gym import spaces
+from scipy.spatial.transform import Rotation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,13 +21,13 @@ spec.loader.exec_module(module)
 DexjocoImageWrapper = module.DexjocoImageWrapper
 
 
-def shape_meta(state_dim=31, cameras=2, size=4):
+def shape_meta(state_dim=31, cameras=2, size=4, action_dim=22):
     return {
         'obs': {
             'rgb': {'shape': [size, size, 3 * cameras]},
             'state': {'shape': [state_dim]},
         },
-        'action': {'shape': [22]},
+        'action': {'shape': [action_dim]},
     }
 
 
@@ -70,6 +71,29 @@ class RandomizedEnvironment(MeasuredEnvironment):
     """With randomization on, DexJoCo renames the third-person camera."""
 
     front_key = 'random_camera'
+
+
+class BimanualEnvironment(MeasuredEnvironment):
+    # Object state precedes the robot, so actions must locate raw proprioception
+    # by key instead of assuming it starts at column zero.
+    proprio_keys = ['object_pose', 'tcp_pose', 'gripper_pose']
+    proprio_space = {
+        'object_pose': spaces.Box(-1, 1, shape=(8,)),
+        'tcp_pose': spaces.Box(-1, 1, shape=(14,)),
+        'gripper_pose': spaces.Box(-1, 1, shape=(32,)),
+    }
+    front_key = 'ego'
+
+    def observation(self):
+        right_q = Rotation.from_euler('x', self.x / 10).as_quat()[[3, 0, 1, 2]]
+        left_q = Rotation.from_euler('y', -self.x / 10).as_quat()[[3, 0, 1, 2]]
+        return {
+            'state': np.r_[np.full(8, 99.), self.x, 1., 2., right_q,
+                           -2 * self.x, 3., 4., left_q, np.full(16, .2), np.full(16, .3)],
+            self.front_key: self._frame(10),
+            'wrist_left': self._frame(100),
+            'wrist_right': self._frame(200),
+        }
 
 
 def wrap(env=None, state_dim=31, cameras=2, **kwargs):
@@ -196,6 +220,90 @@ class ObservationTests(unittest.TestCase):
     def test_shape_meta_is_required(self):
         with self.assertRaisesRegex(ValueError, 'shape_meta'):
             DexjocoImageWrapper(env=MeasuredEnvironment())
+
+
+class BimanualTests(unittest.TestCase):
+    def wrap_bimanual(self, env, **kwargs):
+        return DexjocoImageWrapper(
+            env=env,
+            shape_meta=shape_meta(state_dim=46, cameras=3, action_dim=44),
+            image_keys=['ego', 'wrist_left', 'wrist_right'],
+            **kwargs,
+        )
+
+    def test_normalized_actions_use_each_arms_latest_pose_and_absolute_hands(self):
+        from util.dexjoco_actions import normalize
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'normalization.npz'
+            lo = np.full(44, -2.)
+            hi = np.full(44, 4.)
+            np.savez(path, obs_min=np.full(46, -30.), obs_max=np.full(46, 30.),
+                     action_min=lo, action_max=hi, normalized=True)
+            env = BimanualEnvironment()
+            wrapper = self.wrap_bimanual(env, normalization_path=str(path))
+            obs = wrapper.reset()
+            np.testing.assert_allclose(
+                obs['state'], normalize(env.observation()['state'][8:], -30., 30.), atol=1e-7
+            )
+            command = np.r_[3., 0., 0., 0., 0., .4, np.full(16, .7),
+                            0., -2., 0., .3, 0., 0., np.full(16, -.8)]
+            for x in (8., 9., 8.):
+                if x == 8. and env.x != 8.:
+                    wrapper.reset()
+                wrapper.step(normalize(command, lo, hi))
+                target = env.last_target
+                self.assertEqual(target.shape, (46,))
+                self.assertEqual(target.dtype, np.float32)
+                np.testing.assert_allclose(target[:3], [x + 3., 1., 2.], atol=1e-6)
+                np.testing.assert_allclose(target[7:10], [-2 * x, 1., 4.], atol=1e-6)
+                expected_right = Rotation.from_rotvec([0., 0., .4]) * Rotation.from_euler('x', x / 10)
+                expected_left = Rotation.from_rotvec([.3, 0., 0.]) * Rotation.from_euler('y', -x / 10)
+                for start, expected in ((3, expected_right), (10, expected_left)):
+                    q = target[start:start + 4]
+                    actual = Rotation.from_quat(q[[1, 2, 3, 0]])
+                    self.assertAlmostEqual((actual * expected.inv()).magnitude(), 0., places=6)
+                np.testing.assert_allclose(target[14:30], .7, atol=1e-7)
+                np.testing.assert_allclose(target[30:46], -.8, atol=1e-7)
+
+    def test_proprioception_and_three_camera_order_without_normalization(self):
+        for randomized in (False, True):
+            with self.subTest(randomized=randomized):
+                env = BimanualEnvironment()
+                if randomized:
+                    env.front_key = 'random_camera'
+                wrapper = self.wrap_bimanual(env)
+                obs = wrapper.reset()
+                self.assertEqual(wrapper.action_space.shape, (44,))
+                np.testing.assert_allclose(obs['state'], env.observation()['state'][8:])
+                self.assertEqual(obs['rgb'].shape, (4, 4, 9))
+                self.assertEqual(obs['rgb'].dtype, np.uint8)
+                for i, value in enumerate((10, 100, 200)):
+                    np.testing.assert_array_equal(obs['rgb'][..., 3 * i:3 * (i + 1)], value)
+
+    def test_action_width_must_match_environment_proprioception(self):
+        with self.assertRaisesRegex(ValueError, '44-dim actions require tcp_pose'):
+            DexjocoImageWrapper(
+                env=MeasuredEnvironment(), shape_meta=shape_meta(state_dim=23, action_dim=44)
+            )
+        with self.assertRaisesRegex(ValueError, '22-dim actions require tcp_pose'):
+            DexjocoImageWrapper(
+                env=BimanualEnvironment(), shape_meta=shape_meta(state_dim=46)
+            )
+
+    def test_normalization_action_width_must_match_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'normalization.npz'
+            np.savez(path, obs_min=np.zeros(46), obs_max=np.ones(46),
+                     action_min=np.zeros(22), action_max=np.ones(22))
+            with self.assertRaisesRegex(ValueError, 'shape_meta action shape'):
+                self.wrap_bimanual(BimanualEnvironment(), normalization_path=str(path))
+
+    def test_invalid_action_shape_is_rejected_before_broadcasting(self):
+        wrapper = self.wrap_bimanual(BimanualEnvironment())
+        wrapper.reset()
+        for action in (0., np.zeros(1), np.zeros(22), np.zeros((1, 44))):
+            with self.assertRaisesRegex(ValueError, 'Expected action shape'):
+                wrapper.step(action)
 
 
 if __name__ == '__main__':

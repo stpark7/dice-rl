@@ -407,6 +407,8 @@ class DistillResidualRLModel(nn.Module):
         
         # Now load the processed config with OmegaConf
         pretrained_cfg = OmegaConf.create(config_text)
+        pretrained_cfg.device = device
+        pretrained_cfg.model.device = device
         
         # Instantiate the model using the processed config
         pretrained_model = hydra.utils.instantiate(pretrained_cfg.model)

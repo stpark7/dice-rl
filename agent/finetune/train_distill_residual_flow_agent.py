@@ -662,7 +662,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 done_venv = terminated_venv | truncated_venv
                 
                 # Store per-timestep rewards like pretraining
-                reward_trajs.append(reward_venv)
+                # Ignore episodes automatically started after the requested
+                # seeded episode ended, as in the finetuned-policy evaluator.
+                reward_trajs.append(np.where(episode_done, 0.0, reward_venv))
                 
                 for env_idx in range(self.eval_n_envs):
                     if not episode_done[env_idx]:
@@ -1049,8 +1051,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                         f"buffer_size={len(self.replay_buffer)}")
             
         # Final evaluation and save
-        self.evaluate(total_steps)
-        # self.save_model(total_steps)
+        if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv'):
+            self.evaluate(total_steps)
+        self.save_model(total_steps)
         log.info("Training completed")
     
     def save_model(self, step=None):
@@ -1164,5 +1167,3 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 elif isinstance(item, (dict, list)):
                     self._fix_wrapper_interpolations(item, old_ref, new_ref)
         
-
-

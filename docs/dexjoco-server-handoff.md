@@ -3,7 +3,8 @@
 ## Scope and completion target
 
 The data pipeline supports six image BC tasks. Dataset download, conversion,
-and loading are available; training configurations and offline trainer
+and loading are available. Single-arm and bimanual policy action adapters are
+implemented; training configurations and periodic simulator evaluation
 integration still need to be completed before launching training.
 No Dexjoco training checkpoints are included.
 
@@ -99,14 +100,24 @@ loading; the training loop transfers the batch to the model device.
 
 1. Prepare six Dexjoco task configurations with the dimensions and camera
    selections above. No ready-to-run Dexjoco training configuration is included.
-2. Add and test an offline-BC mode. `PreTrainAgent.__init__` currently always
-   constructs and seeds a simulator. Merely increasing evaluation frequency
-   does not remove this dependency.
-3. `TrainFlowMatchingImgAgent.__init__` resets `val_freq` to 100. Disable rollout
-   explicitly in offline mode and remove remaining environment accesses.
-4. The current Dexjoco image wrapper handles single-arm execution. Bimanual
-   dataset support does not imply bimanual simulator rollout support. Offline
-   BC does not require that adapter; online evaluation/RL does.
+2. Keep simulator evaluation enabled during BC training. Validate episode
+   termination, time limits, fixed evaluation seeds, and per-episode success
+   aggregation before treating rollout metrics as policy success rates.
+3. `TrainFlowMatchingImgAgent.__init__` resets `val_freq` to 100. Honor the
+   configured evaluation frequency and explicitly select the policy/EMA to
+   evaluate. These trainer changes are still pending.
+4. `DexjocoImageWrapper` now supports both 22D single-arm and 44D bimanual
+   actions, using each arm's latest raw measured pose after action
+   unnormalization. Bimanual targets are assembled as
+   `[right_pose7, left_pose7, right_hand16, left_hand16]` for DexJoCo's existing
+   `DualArmPolicyWrapper`; they are not two concatenated 23D targets. Set
+   `policy_mode: true`, `low_dim_keys: [tcp_pose, gripper_pose]`,
+   `shape_meta.obs.state.shape: [46]`, `shape_meta.action.shape: [44]`,
+   `shape_meta.obs.rgb.shape: [96, 96, 9]`, and
+   `image_keys: [ego, wrist_left, wrist_right]` for bimanual tasks. The wrapper
+   resolves `ego` to `random_camera` when domain randomization renames it.
+   Match the camera order in the dataset and model. This adapter change does
+   not complete the trainer evaluation work in items 2–3.
 5. Verify PyTorch/torchvision compatibility. The project pins torch 2.4.0 but
    does not list torchvision as a core dependency, although the image model
    imports it. Consult the release provenance for the actual conversion
@@ -122,3 +133,24 @@ Set `max_n_episodes: 100` to retain all 100 valid episodes per task.
 Record seed (planned: 42), dataset revision, camera order, config, dependencies,
 GPU and smoke-run results. A loss curve and checkpoint do not establish task
 success; no policy success rate has been measured in this local preparation.
+
+## Action-adapter verification (2026-09-20)
+
+The 25 action/wrapper tests and 17 dataset-conversion tests passed, including
+bimanual conversion-to-decoding roundtrip, independent world-frame rotations,
+current measured poses after consecutive steps/reset, normalization, and
+three-camera ordering. Run with:
+
+```bash
+python -m unittest discover -s tests -p 'test_dexjoco*.py' -v
+python -m unittest discover -s tests -p 'test_process_dexjoco_dataset.py' -v
+```
+
+A local CPU smoke run with `MUJOCO_GL=osmesa`, reset seed 42, `policy_mode=true`,
+and no domain randomization passed reset plus two hold-action steps for
+`pick_bucket`, `bimanual_assembly`, `bimanual_hanoi`, and
+`bimanual_microwave_cook`. State/RGB shapes were `(23,)`/`(96, 96, 6)` for the
+single-arm task and `(46,)`/`(96, 96, 9)` for the bimanual tasks. Runtime:
+Python 3.11, NumPy 1.26.4, SciPy 1.17.1, Gym 0.22.0, Gymnasium 1.0.0,
+MuJoCo 3.4.0. This checked the actual simulator action/observation connection,
+not policy training, success rates, or server GPU/EGL rendering.
