@@ -2,7 +2,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from gym import spaces
@@ -58,6 +60,7 @@ class MeasuredEnvironment:
         }
 
     def reset(self, seed=None):
+        self.last_seed = seed
         self.x = 8.
         return self.observation(), {}
 
@@ -162,6 +165,54 @@ class ActionTests(unittest.TestCase):
 
 
 class ObservationTests(unittest.TestCase):
+    def test_single_arm_tasks_construct_with_images_and_correct_hand_space(self):
+        import gymnasium
+
+        repair_tasks = {'click_mouse', 'hammer_nail', 'pinch_tongs'}
+        for task in ('click_mouse', 'fold_glasses', 'hammer_nail', 'pick_bucket',
+                     'pinch_tongs', 'water_plant'):
+            with self.subTest(task=task):
+                proprio = gymnasium.spaces.Dict({
+                    'tcp_pose': gymnasium.spaces.Box(-1, 1, shape=(7,)),
+                    'gripper_pose': gymnasium.spaces.Box(
+                        -1, 1, shape=(1 if task in repair_tasks else 16,)),
+                })
+                env = SimpleNamespace(
+                    proprio_keys=['tcp_pose', 'gripper_pose'],
+                    proprio_space=proprio,
+                    observation_space=gymnasium.spaces.Dict({
+                        'state': gymnasium.spaces.utils.flatten_space(proprio),
+                    }),
+                )
+
+                class Config:
+                    def get_environment(inner, **kwargs):
+                        self.assertEqual(kwargs.get('image_obs'),
+                                         True if task in {'fold_glasses', 'pick_bucket'} else None)
+                        return env
+
+                mappings = ModuleType('dexjoco.tasks.mappings')
+                mappings.CONFIG_MAPPING = {task: Config}
+                with patch.dict(sys.modules, {'dexjoco.tasks.mappings': mappings}):
+                    wrapper = DexjocoImageWrapper(task_name=task, shape_meta=shape_meta(state_dim=23))
+                self.assertEqual(env.proprio_space['gripper_pose'].shape, (16,))
+                self.assertEqual(env.observation_space['state'].shape, (23,))
+                self.assertEqual(wrapper.action_space.shape, (22,))
+
+    def test_reset_seed_repeats_worker_randomness(self):
+        env = MeasuredEnvironment()
+        wrapper = wrap(env=env)
+        rng_state = np.random.get_state()
+        try:
+            for reset_kwargs in ({'seed': 42}, {'options': {'seed': 42}}):
+                wrapper.reset(**reset_kwargs)
+                first = np.random.random(5)
+                self.assertEqual(env.last_seed, 42)
+                wrapper.reset(**reset_kwargs)
+                np.testing.assert_array_equal(np.random.random(5), first)
+        finally:
+            np.random.set_state(rng_state)
+
     def test_low_dim_keys_select_the_policy_state(self):
         env = MeasuredEnvironment()
         wrapper = DexjocoImageWrapper(

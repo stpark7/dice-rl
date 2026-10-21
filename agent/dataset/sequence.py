@@ -1,12 +1,14 @@
 """
 Pre-training data loader. Modified from https://github.com/jannerm/diffuser/blob/main/diffuser/datasets/sequence.py
 
-No normalization is applied here --- we always normalize the data when pre-processing it with a different script, and the normalization info is also used in RL fine-tuning.
+No normalization is applied here
+---
+we always normalize the data when pre-processing it with a different script,
+and the normalization info is also used in RL fine-tuning.
 
 """
 
 from collections import namedtuple
-from pathlib import Path
 import numpy as np
 import torch
 import logging
@@ -21,6 +23,24 @@ Transition = namedtuple("Transition", "actions conditions rewards dones mc_retur
 TransitionWithReturn = namedtuple(
     "Transition", "actions conditions rewards dones reward_to_gos"
 )
+
+
+def _load_cameras(dataset, image_keys, num_steps):
+    """Concatenate the requested cameras' RGB channels in ``image_keys`` order.
+
+    That order fixes the channel order the policy sees, so it must match the
+    online environment wrapper. An NPZ member is only decompressed when it is
+    read, so cameras that are not selected never enter memory.
+    """
+    available = [str(name) for name in dataset["camera_names"]]
+    keys = available if image_keys is None else [str(name) for name in image_keys]
+    if not keys or len(set(keys)) != len(keys) or any(name not in available for name in keys):
+        raise ValueError(f"Invalid camera selection {keys}; available cameras: {available}")
+    missing = [name for name in keys if f"images_{name}" not in dataset]
+    if missing:
+        raise ValueError(f"No images_{missing[0]} array; reconvert the dataset with process_dexjoco_dataset.py")
+    frames = [dataset[f"images_{name}"][:num_steps] for name in keys]
+    return torch.from_numpy(np.concatenate(frames, axis=1))
 
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
@@ -48,7 +68,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         device="cuda:0",
         use_6d_rot=False,  # New parameter for 6D rotation
         abs_action=False,  # Whether to use absolute action mode
-        image_keys=None,  # Ordered camera names for named DexJoCo image archives
+        image_keys=None,  # Ordered camera names for per-camera images_<name> arrays
     ):
         assert (
             img_cond_steps <= cond_steps
@@ -114,16 +134,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         log.info(f"States shape/type: {self.states.shape, self.states.dtype}")
         log.info(f"Actions shape/type: {self.actions.shape, self.actions.dtype}")
         if self.use_img:
-            if "image_store" in dataset:
-                from agent.dataset.camera_images import CameraImages
-
-                self.images = CameraImages(
-                    Path(dataset_path).parent / str(dataset["image_store"].item()),
-                    image_keys, total_num_steps, device,
-                )
+            if "camera_names" in dataset:
+                self.images = _load_cameras(dataset, image_keys, total_num_steps).to(device)
             else:
                 if image_keys is not None:
-                    raise ValueError("image_keys requires a named camera archive")
+                    raise ValueError("image_keys requires per-camera images_<name> arrays")
                 self.images = torch.from_numpy(dataset["images"][:total_num_steps]).to(device)
             log.info(f"Images shape/type: {self.images.shape, self.images.dtype}")
         if isinstance(dataset, np.lib.npyio.NpzFile):

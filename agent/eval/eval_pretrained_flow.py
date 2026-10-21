@@ -183,7 +183,7 @@ def load_flow_matching_policy(checkpoint_path: str, device: str = "cuda"):
     log.info(f"Loading flow matching policy from {checkpoint_path}")
     
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Extract model configuration if available
     if 'cfg' in checkpoint:

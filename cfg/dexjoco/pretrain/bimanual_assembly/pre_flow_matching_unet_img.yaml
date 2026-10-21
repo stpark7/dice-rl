@@ -28,7 +28,7 @@ env:
   name: ${env_name}
   best_reward_threshold_for_success: 1
   # BC max traj_lengths=895, rounded up to a multiple of 100.
-  # Source: robopark/dexjoco-image-data@68a239b1ddabe7228026f94ce57845d10f7d98f2 manifest.json.
+  # Source: robopark/dexjoco-image-data@7c7f5230ab4616a5ec4474cdf0d395cb94e6781e manifest.json.
   max_episode_steps: 900
   save_video: false
   use_image_obs: true

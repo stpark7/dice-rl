@@ -48,6 +48,7 @@ class ConverterTests(unittest.TestCase):
                                action_rotvec=rotvec, timestamp=np.arange(n) * 0.05).items():
             data.array(key, value)
         store.create_group("meta").array("episode_ends", np.array([n]))
+        self.videos(name)
         return store, state, action
 
     def convert(self, **kwargs):
@@ -70,7 +71,7 @@ class ConverterTests(unittest.TestCase):
         self.assertIs(norm["normalized"].item(), True)
         raw_action = (bc["actions"] + 1) / 2 * (norm["action_max"] - norm["action_min"] + 1e-6) + norm["action_min"]
         raw_state = (bc["states"] + 1) / 2 * (norm["obs_max"] - norm["obs_min"] + 1e-6) + norm["obs_min"]
-        np.testing.assert_allclose(raw_state, state[14:], atol=1e-7)
+        np.testing.assert_allclose(raw_state, state[14:, :23], atol=1e-7)
         np.testing.assert_allclose(raw_action[:, :3], targets[14:, :3] - state[14:, :3], atol=1e-7)
         np.testing.assert_allclose(raw_action[:, 3:6], 0, atol=1e-7)
         np.testing.assert_allclose(raw_action[:, 6:], targets[14:, 7:], atol=1e-7)
@@ -107,7 +108,7 @@ class ConverterTests(unittest.TestCase):
         report, bc, _, norm = self.convert(normalize=False)
         self.assertEqual(report["retained_start_indices"], [0])
         self.assertIs(norm["normalized"].item(), False)
-        np.testing.assert_array_equal(bc["states"], state)
+        np.testing.assert_array_equal(bc["states"], state[:, :23])
         np.testing.assert_allclose(
             bc["actions"][:, :3], action[:, :3] - state[:, :3], atol=1e-6
         )
@@ -163,13 +164,14 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(report["retained_start_indices"], [4])
         self.assertEqual(report["episode_details"][0]["zero_prefix_steps"], 4)
 
-    def test_rerun_replaces_the_previous_output_in_place(self):
+    def test_rerun_preserves_the_previous_image_dataset(self):
         self.episode()
         _, bc, _, _ = self.convert()
         self.assertEqual(len(bc["states"]), 18)
-        report, bc, _, _ = self.convert(hold_min_duration=1.0)
-        self.assertEqual(report["retained_start_indices"], [0])
-        self.assertEqual(len(bc["states"]), 32)
+        with self.assertRaises(FileExistsError):
+            self.convert(hold_min_duration=1.0)
+        with np.load(self.out / "ph_pretrain/train.npz") as dataset:
+            np.testing.assert_array_equal(dataset["states"], bc["states"])
 
     def test_configurable_motion_thresholds(self):
         self.episode()
@@ -181,6 +183,8 @@ class ConverterTests(unittest.TestCase):
         cameras = cameras or ["front", "wrist", "ego_left", "ego_right"]
         directory = self.raw / name / "videos"
         directory.mkdir(exist_ok=True)
+        for path in directory.glob("*.mp4"):
+            path.unlink()
         for camera_index, camera in enumerate(cameras):
             with av.open(str(directory / (camera + ".mp4")), mode="w") as container:
                 stream = container.add_stream("libx264rgb", rate=20)
@@ -199,16 +203,19 @@ class ConverterTests(unittest.TestCase):
         from agent.dataset.sequence import StitchedSequenceDataset
         self.episode()
         self.videos()
-        report, bc, _, norm = self.convert(with_images=True)
+        report, bc, rl, norm = self.convert()
         self.assertEqual(report["image_size"], [96, 96])
         self.assertEqual(report["camera_names"], ["ego_left", "ego_right", "front", "wrist"])
         self.assertEqual(bc["states"].shape, (18, 23))
         self.assertEqual(norm["obs_min"].shape, (23,))
-        images = zarr.open(str(self.out / "images.zarr"), mode="r")
-        self.assertEqual(set(images.array_keys()), set(report["camera_names"]))
-        self.assertEqual(images["front"].shape, (18, 3, 96, 96))
-        self.assertEqual(images["front"].dtype, np.uint8)
-        np.testing.assert_allclose(images["front"][0, :, 0, 0], [56, 0, 200], atol=1)
+        self.assertFalse((self.out / "images.zarr").exists())
+        for dataset in (bc, rl):  # both files are self-contained
+            self.assertEqual(list(dataset["camera_names"]), report["camera_names"])
+            for camera in report["camera_names"]:
+                self.assertEqual(dataset[f"images_{camera}"].shape, (18, 3, 96, 96))
+                self.assertEqual(dataset[f"images_{camera}"].dtype, np.uint8)
+        np.testing.assert_allclose(bc["images_front"][0, :, 0, 0], [56, 0, 200], atol=1)
+        np.testing.assert_allclose(rl["images_wrist"][-1, :, 0, 0], [124, 50, 200], atol=1)
         dataset = StitchedSequenceDataset(
             str(self.out / "ph_pretrain/train.npz"), device="cpu", use_img=True,
             image_keys=["wrist", "front"], horizon_steps=4, cond_steps=2, img_cond_steps=2,
@@ -225,7 +232,7 @@ class ConverterTests(unittest.TestCase):
         self.episode()
         self.videos(length=31)
         with self.assertRaisesRegex(ValueError, "frame"):
-            self.convert(with_images=True)
+            self.convert()
         self.assertFalse((self.out / "ph_pretrain/train.npz").exists())
 
     def test_camera_set_mismatch_fails_conversion(self):
@@ -234,7 +241,7 @@ class ConverterTests(unittest.TestCase):
         self.videos()
         self.videos("demo_1_test", cameras=["front"])
         with self.assertRaisesRegex(ValueError, "camera set"):
-            self.convert(with_images=True)
+            self.convert()
         self.assertFalse((self.out / "ph_pretrain/train.npz").exists())
 
     def test_image_history_does_not_cross_episodes_and_legacy_images_work(self):
@@ -243,7 +250,7 @@ class ConverterTests(unittest.TestCase):
         self.episode("demo_1_test")
         self.videos()
         self.videos("demo_1_test", blue=100)
-        self.convert(with_images=True, image_size=32)
+        self.convert(image_size=32)
         path = str(self.out / "ph_pretrain/train.npz")
         dataset = StitchedSequenceDataset(path, device="cpu", use_img=True,
                                           horizon_steps=4, cond_steps=3, img_cond_steps=2)
@@ -254,7 +261,7 @@ class ConverterTests(unittest.TestCase):
         np.testing.assert_allclose(dataset[0].conditions["rgb"][:, 2::3], 200, atol=1)
         self.assertEqual(tuple(dataset[0].conditions["rgb"].shape), (2, 12, 32, 32))
         with self.assertRaises(FileExistsError):
-            self.convert(with_images=True)
+            self.convert()
         with np.load(path) as archive:
             arrays = {k: archive[k] for k in ("states", "actions", "traj_lengths")}
         images = np.arange(36 * 3 * 4 * 4, dtype=np.uint8).reshape(36, 3, 4, 4)
@@ -269,7 +276,7 @@ class ConverterTests(unittest.TestCase):
         from agent.dataset.sequence import StitchedSequenceQLearningDataset
         self.episode()
         self.videos()
-        self.convert(with_images=True)
+        self.convert()
         dataset = StitchedSequenceQLearningDataset(
             str(self.out / "ph_finetune/train.npz"), device="cpu", use_img=True,
             image_keys=["front"], horizon_steps=2, cond_steps=2, img_cond_steps=2,
@@ -305,7 +312,7 @@ class ConverterTests(unittest.TestCase):
             store["data"].array(key, value)
         self.videos(cameras=["ego", "wrist_left", "wrist_right"])
         report = process("bimanual_assembly", str(self.raw), str(self.out),
-                         with_images=True, normalize=False)
+                         normalize=False)
         self.assertEqual(report["retained_start_indices"], [14])
         self.assertEqual(report["camera_names"], ["ego", "wrist_left", "wrist_right"])
         with np.load(self.out / "ph_pretrain/train.npz") as dataset:

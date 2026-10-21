@@ -183,7 +183,7 @@ expert_dataset:
   horizon_steps: ${horizon_steps}
   cond_steps: ${cond_steps}
   img_cond_steps: ${img_cond_steps}
-  device: cpu  # Named image archive stays on CPU; feature batches move to the model device
+  device: cpu  # Image arrays stay on CPU; feature batches move to the model device
   image_keys: ${env.wrappers.dexjoco_image.image_keys}
   discount_factor: ${train.gamma}
   gamma: ${train.gamma}  # Discount for horizon aggregation

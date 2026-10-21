@@ -39,7 +39,7 @@ source script/set_path.sh
 ```
 
 ## Download datasets and checkpoints from Hugging Face
-Download all checkpoints and datasets from Hugging Face with the following command. This will download the datasets and checkpoints to the specified data and log directories respectively. If you only want to download specific datasets or checkpoints, you can find the links on the Hugging Face page and download them manually.
+Download the public DexJoCo single-arm image datasets with the following command. It uses `DICE_RL_DATA_DIR` when set, otherwise this repository's `data_dir/`. No Hugging Face token is required.
 
 ```console
 bash script/download_hf.sh
@@ -47,24 +47,29 @@ bash script/download_hf.sh
 
 ### Dexjoco image datasets
 
-The six-task image release is hosted at
-[robopark/dexjoco-image-data](https://huggingface.co/datasets/robopark/dexjoco-image-data).
-The repository is private; use a Hugging Face account/token with read access.
-Authenticate with `python -c 'from huggingface_hub import login; login()'` or
-provide `HF_TOKEN` through your environment. Do not put tokens in source files.
+The public six-task single-arm image release is hosted at
+[robopark/dexjoco-single-arm-data](https://huggingface.co/datasets/robopark/dexjoco-single-arm-data).
+It can be downloaded without authentication.
+The 2026-10-21 release contains 596 episodes (98 pick_bucket, 99 each for
+click_mouse and hammer_nail, and 100 per remaining task) and 216,890 retained
+transitions. Four poor-quality demonstrations were removed before reprocessing,
+and normalization was recomputed for the affected tasks.
+Archives total 7.84 GiB; allow about 16 GiB for cached
+archives and extracted data.
 
 From the repository root, with the Python environment activated:
 
 ```bash
-export DICE_RL_DATA_DIR="$PWD/data_dir"
+bash script/download_hf.sh
+# The optional explicit selector is also supported:
 bash script/download_hf.sh dexjoco
 
 # Or download only selected tasks:
-bash script/download_hf.sh dexjoco --task hammer_nail --task bimanual_hanoi
+bash script/download_hf.sh --task hammer_nail water_plant
 ```
 
-The tasks are `hammer_nail`, `pick_bucket`, `fold_glasses`,
-`bimanual_assembly`, `bimanual_hanoi`, and `bimanual_microwave_cook`.
+The tasks are `click_mouse`, `fold_glasses`, `hammer_nail`, `pick_bucket`,
+`pinch_tongs`, and `water_plant`. Both `ph_pretrain` and `ph_finetune` are included.
 The downloader resolves one HF commit for the entire download, checks each
 archive's SHA-256, and installs complete task directories atomically. Record the
 printed commit hash, or supply `--revision <commit>` to reproduce a release.
@@ -73,21 +78,21 @@ to choose where downloaded archives are cached. Allow disk space for both the
 cached archives and extracted data. Existing local datasets without a matching
 download receipt are preserved; use another data directory to download a fresh
 copy. Repeating a completed download reuses its installation receipt; it does
-not re-audit locally edited image chunks.
+not re-audit locally edited files.
 
 ```text
 data_dir/dexjoco/{task}-img/
 ├── episodes.json
-├── images.zarr/                 # all recorded cameras, RGB uint8, 96×96
 ├── ph_pretrain/
-│   ├── train.npz
+│   ├── train.npz                # states, actions, traj_lengths, camera_names, images_<camera>
 │   └── normalization.npz
 └── ph_finetune/
-    ├── train.npz
+    ├── train.npz                # the same, plus rewards and terminals
     └── normalization.npz
 ```
 
-Keep each task directory together: both NPZ files reference `../images.zarr`.
+Each NPZ file carries every recorded camera as an `images_<camera>` array
+(RGB uint8, 96×96), so a single file is enough to train from.
 Image BC uses 23-dimensional proprioception and 22-dimensional actions for
 single-arm tasks, or 46-dimensional proprioception and 44-dimensional actions
 for bimanual tasks. Select cameras explicitly with `train_dataset.image_keys`;
@@ -95,11 +100,23 @@ match the model's `num_img` and image shape to that ordered selection.
 The finetuning files assign a synthetic terminal reward to every retained
 episode; they do not certify recorded task success.
 
-See [the server setup notes](docs/dexjoco-server-handoff.md) for
-data-loader configuration and remaining BC
-trainer integration work. These are datasets; trained Dexjoco checkpoints are
-not part of this release. The no-argument download command above continues to
-download the original Robomimic datasets and checkpoints.
+See [the BC training guide](docs/PRE_TRAINING.md) for
+data-loader configuration, training, and evaluation. These are datasets; trained Dexjoco checkpoints are
+not part of this release.
+
+The older mixed single-arm/bimanual release remains accessible explicitly
+(requires an account/token with read access to that private repository):
+
+```bash
+bash script/download_hf.sh --repo-id robopark/dexjoco-image-data --task bimanual_hanoi
+```
+
+To download the original Robomimic datasets and checkpoints, configure both
+`DICE_RL_DATA_DIR` and `DICE_RL_LOG_DIR`, then run:
+
+```bash
+bash script/download_hf.sh robomimic
+```
 
 ### Robomimic download layout
 

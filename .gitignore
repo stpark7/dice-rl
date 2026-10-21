@@ -28,6 +28,7 @@ cfg/robomimic/*.sh
 *.mp4
 *.pdf
 *.svg
+!media/dexjoco-bc/pretraining_success_template.svg
 
 # Output files
 *.out

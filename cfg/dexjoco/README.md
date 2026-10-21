@@ -23,16 +23,19 @@ RGB channels, state/action shapes, and conditioning width match each task.
 Parameter order and shared training settings in all five configs follow
 `cfg/robomimic/pretrain/tool_hang/pre_diffusion_mlp_img.yaml`: 8,000 epochs,
 a 5,000-epoch LR cycle, dropout 0.1, EMA decay cap 0.995,
-and checkpoint saving every 200 epochs. Microwave Cook now uses 5,000 training
-epochs; other task configs retain 8,000. Batch size is 512 after a GPU memory
-probe (the reference uses 128). With five bimanual assembly environments,
+and checkpoint saving every 200 epochs. Microwave Cook uses 3,000 training
+epochs with a matching LR cycle, batch size 256, and U-Net base channels 256;
+other task configs retain 8,000 epochs, batch size 512, and base channels 128.
+Batch size 512 was selected after a GPU memory probe (the reference uses 128).
+With five bimanual assembly environments,
 three optimizer updates at batch 512 peaked at 5.50 GiB allocated / 6.55 GiB
 reserved by PyTorch on an RTX 3090; simulator/driver memory is additional.
 They retain Flow Matching with 10 flow
 steps, DexJoCo-specific dimensions/cameras/wrappers, 96x96 images with an 84x84
 crop, the dataset-derived episode limit, and CPU dataset storage.
 
-All use an 8-step action horizon/execution and one observation frame. These
+Microwave Cook uses a 16-step action horizon/execution; other tasks use 8 steps.
+All use one observation frame. These
 are reference-based starting hyperparameters, not measured optimal DexJoCo
 settings. Simulator domain randomization defaults to false; select the
 evaluation distribution explicitly for an experiment.
@@ -47,13 +50,11 @@ action chunks. One override propagates to both environment wrappers. The
 simulator may still truncate earlier according to its own internal limit.
 
 The configured limits use `max_trajectory_length` from the pinned release
-[`manifest.json`](https://huggingface.co/datasets/robopark/dexjoco-image-data/blob/68a239b1ddabe7228026f94ce57845d10f7d98f2/manifest.json).
-The release audit computes this field directly from BC `train.npz`
-`traj_lengths.max()`. The six task datasets have also been downloaded to
-`data_dir/dexjoco/` at this revision with archive SHA-256 verification.
-The installed BC arrays match the release episode counts, dimensions, and
-trajectory maxima; first and last image frames are readable for every camera.
-Local verification details are in `data_dir/dexjoco/download-verification.json`.
+[`manifest.json`](https://huggingface.co/datasets/robopark/dexjoco-image-data/blob/7c7f5230ab4616a5ec4474cdf0d395cb94e6781e/manifest.json),
+which corresponds to BC `train.npz` `traj_lengths.max()`.
+The trajectory maxima are unchanged from the earlier
+version 1 release, so these limits did not need to be revised when the image
+storage layout changed.
 
 | Task | BC maximum steps | max_episode_steps |
 |---|---:|---:|
@@ -90,8 +91,8 @@ episode accounting across rounds.
 The previous unused `eval` protocol fields were removed rather than implying
 that the trainer honors episode counts, final evaluation, seed overrides, or
 weight selection. Supporting those options requires changes to the image
-evaluator. `train.render.freq` matches the reference value of 2 but does not
-control rollout frequency in the current image trainer. `n_envs` is per
+evaluator. `train.render.freq` is 1 for Microwave Cook and 2 for the other tasks;
+it does not control rollout frequency in the current image trainer. `n_envs` is per
 process, so all five configs together would create 60 environments. After
 stopping Hammer Nail and Assembly, the three active training jobs use 40 environments.
 These config files do not change trainer code or establish policy success rates.

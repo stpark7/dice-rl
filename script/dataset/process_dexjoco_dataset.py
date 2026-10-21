@@ -1,19 +1,21 @@
-"""Convert DexJoCo Zarr demos and optional camera videos to training datasets.
+"""Convert DexJoCo Zarr demos and all camera videos to training datasets.
 
 Targets are current-observation deltas: world xyz displacement, world relative
 SO(3) rotation vector, and absolute Allegro joint targets (22 values per arm).
 Bimanual recordings store right-target23 then left-target23; observations store
-both TCP poses followed by both hands. Raw state columns retain the live
-environment's ordering; image conversion selects TCP and hand proprioception.
+both TCP poses followed by both hands. Conversion selects TCP and hand
+proprioception from the raw states in the live environment's ordering.
 Leading zero-command markers and
 long initial held-target prefixes are removed. Every valid episode is converted;
 the training config picks how many of them to load (`max_n_episodes`).
 Timestamps are seconds; held commands do not imply physical stationarity.
 
-Outputs under data_dir/dexjoco/<task> are ph_pretrain and ph_finetune
+Outputs under data_dir/dexjoco/<task>-img are ph_pretrain and ph_finetune
 train.npz / normalization.npz, plus episodes.json with selection and cut provenance.
-With --with_images, all MP4 cameras are stored at 96x96 in a shared images.zarr,
-referenced by both NPZ files. The default output task name gains an -img suffix.
+Every MP4 camera is stored at 96x96 by default as a per-camera
+`images_<camera>` array inside both NPZ files, next to `camera_names`, so the
+loader decompresses only the cameras it is asked for. The default output task
+name gains an -img suffix.
 """
 
 import argparse
@@ -230,12 +232,12 @@ def _prefix_details(targets, marker_actions, timestamps, *,
 
 
 def process(task, raw_path, save_root, normalize=True,
-            *, with_images=False, image_size=96, motion_position_threshold=0.001,
+            *, image_size=96, motion_position_threshold=0.001,
             motion_rotation_threshold_deg=0.5, motion_hand_threshold=0.01,
             motion_consecutive_samples=3, hold_min_duration=0.5,
             hold_context_duration=0.1):
     """Validate and clean every recording, then save both datasets."""
-    if with_images and (Path(save_root) / "ph_pretrain/train.npz").exists():
+    if (Path(save_root) / "ph_pretrain/train.npz").exists():
         raise FileExistsError(f"Image dataset already exists at {save_root}; choose a new --save_dir")
     if image_size < 1:
         raise ValueError("image_size must be positive")
@@ -259,22 +261,18 @@ def process(task, raw_path, save_root, normalize=True,
     if not valid:
         raise ValueError(f"No valid episodes; rejection reasons saved in {save_root}/episodes.json")
 
-    image_metadata = None
-    if with_images:
-        from script.dataset.dexjoco_video import save_episode_videos
+    from script.dataset.dexjoco_video import load_episode_videos
 
-        cameras = save_episode_videos(raw_path, report, Path(save_root) / "images.zarr", image_size)
-        for episode in valid:
-            n_arms = episode.actions.shape[1] // ACTION_DIM
-            episode.states = episode.states[:, :23 * n_arms]
-        report.update(camera_names=cameras, image_size=[image_size, image_size],
-                      image_layout="TCHW", color_space="RGB",
-                      state_keys=["tcp_pose", "gripper_pose"],
-                      state_dim=int(valid[0].states.shape[1]),
-                      action_dim=int(valid[0].actions.shape[1]))
-        image_metadata = dict(image_store=np.asarray("../images.zarr"),
-                              camera_names=np.asarray(cameras))
-    _save_datasets(save_root, valid, normalize, image_metadata)
+    images = load_episode_videos(raw_path, report, image_size)
+    for episode in valid:
+        n_arms = episode.actions.shape[1] // ACTION_DIM
+        episode.states = episode.states[:, :23 * n_arms]
+    report.update(camera_names=list(images), image_size=[image_size, image_size],
+                  image_layout="TCHW", color_space="RGB",
+                  state_keys=["tcp_pose", "gripper_pose"],
+                  state_dim=int(valid[0].states.shape[1]),
+                  action_dim=int(valid[0].actions.shape[1]))
+    _save_datasets(save_root, valid, normalize, images)
     with (Path(save_root) / "episodes.json").open("w") as file:
         json.dump(report, file, indent=2)
     logging.info(
@@ -319,8 +317,8 @@ def _build_report(task, raw_path, normalize, n_available, valid, rejected, thres
     )
 
 
-def _save_datasets(save_root, episodes, normalize, image_metadata=None):
-    """Share normalization and trajectories across BC and residual-RL outputs."""
+def _save_datasets(save_root, episodes, normalize, images):
+    """Share normalization, trajectories and images across BC and residual-RL outputs."""
     states = np.concatenate([episode.states for episode in episodes])
     actions = np.concatenate([episode.actions for episode in episodes])
     obs_min, obs_max = states.min(axis=0), states.max(axis=0)
@@ -333,8 +331,10 @@ def _save_datasets(save_root, episodes, normalize, image_metadata=None):
                          normalized=np.asarray(bool(normalize)))
     lengths = np.asarray([episode.details["retained_length"] for episode in episodes], dtype=np.int64)
     shared = dict(states=states, actions=actions, traj_lengths=lengths)
-    if image_metadata is not None:
-        shared.update(image_metadata)
+    # One array per camera: an NPZ member is only decompressed when read,
+    # so the loader can pick cameras without touching the others.
+    shared["camera_names"] = np.asarray(list(images))
+    shared.update({f"images_{name}": frames for name, frames in images.items()})
     rewards = np.zeros(len(states), dtype=np.float32)
     rewards[np.cumsum(lengths) - 1] = 1.0
     for folder, arrays in (
@@ -354,14 +354,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", required=True,
                         help="Task directory name (single-arm or bimanual)")
-    parser.add_argument("--with_images", action="store_true",
-                        help="Save every videos/*.mp4 camera as RGB, with proprioceptive states")
     parser.add_argument("--image_size", type=int, default=96,
                         help="Saved square image size (default: 96); no loader resizing")
     parser.add_argument("--raw_path", default=None,
                         help="Raw demo directory (default: ../dexjoco/datasets/raw/dexjoco_raw_datasets/<task>)")
     parser.add_argument("--save_dir", default=None,
-                        help="Output root (default: data_dir/dexjoco/<task>[-img]); image output must be new")
+                        help="Output root (default: data_dir/dexjoco/<task>-img); output must be new")
 
     parser.add_argument("--motion_position_threshold", type=float, default=0.001, help="Target xyz departure in meters")
     parser.add_argument("--motion_rotation_threshold_deg", type=float, default=0.5)
@@ -376,8 +374,7 @@ def main(argv=None):
     args["raw_path"] = args["raw_path"] or os.path.join(
         "..", "dexjoco", "datasets", "raw", "dexjoco_raw_datasets", task
     )
-    suffix = "-img" if args["with_images"] else ""
-    args["save_root"] = args.pop("save_dir") or os.path.join("data_dir", "dexjoco", task + suffix)
+    args["save_root"] = args.pop("save_dir") or os.path.join("data_dir", "dexjoco", task + "-img")
     process(**args)
 
 

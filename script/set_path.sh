@@ -48,3 +48,14 @@ else
   # If ENTITY is empty, skip setting the environment variable
   echo "No WandB entity provided. Please set wandb=null when running scripts to disable wandb logging and avoid error."
 fi
+
+##################### MuJoCo Rendering #####################
+
+# Use EGL for headless rollout evaluation and video rendering.
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+
+echo 'export MUJOCO_GL=egl' >> ~/.bashrc
+echo 'export PYOPENGL_PLATFORM=egl' >> ~/.bashrc
+
+echo "MuJoCo EGL rendering configured in the current session and ~/.bashrc."

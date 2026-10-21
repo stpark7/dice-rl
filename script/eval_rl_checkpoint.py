@@ -303,7 +303,8 @@ def main():
     
     # Load checkpoint
     print(f"Loading checkpoint from {args.ckpt_path}")
-    checkpoint = torch.load(args.ckpt_path, map_location=args.device)
+    # Full training checkpoints include the OmegaConf configuration.
+    checkpoint = torch.load(args.ckpt_path, map_location=args.device, weights_only=False)
     
     # Extract directory path from checkpoint path and load config from .hydra/config.yaml
     ckpt_dir = os.path.dirname(args.ckpt_path)
@@ -347,7 +348,9 @@ def main():
             else:
                 # Fallback: try loading from checkpoint in case it's stored there
                 print(f"  Config not found at {pretrained_config_path}, checking checkpoint...")
-                pretrained_checkpoint = torch.load(cfg.base_policy_path, map_location='cpu')
+                pretrained_checkpoint = torch.load(
+                    cfg.base_policy_path, map_location='cpu', weights_only=False
+                )
                 if 'cfg' in pretrained_checkpoint:
                     pretrained_config = pretrained_checkpoint['cfg']
                 elif 'config' in pretrained_checkpoint:

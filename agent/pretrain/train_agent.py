@@ -169,11 +169,13 @@ class PreTrainAgent:
             abs_action=cfg.get("abs_action", False),  # Pass absolute action flag
             **cfg.env.specific if "specific" in cfg.env else {},
         )
-        if not env_type == "furniture":
-            self.venv.seed(
-                [self.seed + i for i in range(cfg.env.n_envs)]
-            )  # otherwise parallel envs might have the same initial states!
-            # isaacgym environments do not need seeding
+        # Seed each worker on its first reset, avoiding the deprecated vector
+        # seed API and an extra simulator reset during initialization.
+        # IsaacGym environments manage their own seeds.
+        self._initial_env_seeds = (
+            {i: self.seed + i for i in range(cfg.env.n_envs)}
+            if env_type != "furniture" else {}
+        )
         self.n_envs = cfg.env.n_envs
         self.n_cond_step = cfg.cond_steps
         self.obs_dim = cfg.obs_dim
@@ -293,7 +295,13 @@ class PreTrainAgent:
             options_venv = [
                 {k: v for k, v in kwargs.items()} for _ in range(self.n_envs)
             ]
+        initial_seeds = getattr(self, "_initial_env_seeds", {})
+        options_venv = [dict(options) for options in options_venv]
+        for index, options in enumerate(options_venv):
+            if index in initial_seeds:
+                options.setdefault("seed", initial_seeds[index])
         obs_venv = self.venv.reset_arg(options_list=options_venv)
+        initial_seeds.clear()
         if isinstance(obs_venv, list):
             obs_venv = {
                 key: np.stack([obs_venv[i][key] for i in range(self.n_envs)])
@@ -308,7 +316,11 @@ class PreTrainAgent:
 
     def reset_env(self, env_ind, verbose=False):
         task = {}
+        initial_seeds = getattr(self, "_initial_env_seeds", {})
+        if env_ind in initial_seeds:
+            task["seed"] = initial_seeds[env_ind]
         obs = self.venv.reset_one_arg(env_ind=env_ind, options=task)
+        initial_seeds.pop(env_ind, None)
         if verbose:
             logging.info(f"<-- Reset environment {env_ind} with task {task}")
         return obs

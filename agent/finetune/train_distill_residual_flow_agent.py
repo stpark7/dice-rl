@@ -1086,7 +1086,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             log.warning(f"Model file {load_path} not found")
             return
         
-        checkpoint = torch.load(load_path, map_location=self.device)
+        # Full training checkpoints include the OmegaConf configuration.
+        checkpoint = torch.load(load_path, map_location=self.device, weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])

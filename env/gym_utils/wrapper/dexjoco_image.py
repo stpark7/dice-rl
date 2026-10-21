@@ -89,10 +89,10 @@ class DexjocoImageWrapper(gym.Env):
         if env is None:
             from dexjoco.tasks.mappings import CONFIG_MAPPING
 
-            # Hammer Nail always emits camera observations and does not accept
-            # image_obs. Other tasks need it explicitly enabled. Missing camera
-            # frames are still rejected when observations are processed.
-            image_kwargs = {} if task_name == "hammer_nail" else {"image_obs": True}
+            # These tasks always emit images and do not accept image_obs.
+            # Other tasks need it enabled; get_observation still checks frames.
+            always_image_tasks = {"hammer_nail", "click_mouse", "pinch_tongs", "water_plant"}
+            image_kwargs = {} if task_name in always_image_tasks else {"image_obs": True}
             try:
                 self.env = CONFIG_MAPPING[task_name]().get_environment(
                     policy_mode=policy_mode,
@@ -100,6 +100,20 @@ class DexjocoImageWrapper(gym.Env):
                     randomize=randomize,
                     **image_kwargs,
                 )
+                # These upstream tasks return all 16 Allegro joints but still
+                # declare the old scalar gripper space. Correct the declaration
+                # before using it to locate fields in the flattened observation.
+                if task_name in {"click_mouse", "hammer_nail", "pinch_tongs"}:
+                    proprio = self.env.proprio_space
+                    if tuple(proprio["gripper_pose"].shape) == (1,):
+                        import gymnasium
+
+                        proprio["gripper_pose"] = gymnasium.spaces.Box(
+                            -np.inf, np.inf, shape=(16,), dtype=np.float64
+                        )
+                        self.env.observation_space["state"] = (
+                            gymnasium.spaces.utils.flatten_space(proprio)
+                        )
             except TypeError as error:
                 raise TypeError(
                     f"The installed DexJoCo does not support image observations for "
@@ -317,8 +331,9 @@ class DexjocoImageWrapper(gym.Env):
             except Exception:
                 pass
 
-    def reset(self, options={}, **kwargs):
+    def reset(self, options=None, seed=None, **kwargs):
         """Reset the environment and return an image+state observation."""
+        options = {} if options is None else options
         self.success_count = 0
         self.ever_succeeded = False
 
@@ -326,12 +341,13 @@ class DexjocoImageWrapper(gym.Env):
         if "video_path" in options:
             self.video_writer = imageio.get_writer(options["video_path"], fps=30)
 
-        # Seed handling mirrors RobomimicImageWrapper:
-        #   - explicit seed in options  -> deterministic (evaluation)
-        #   - otherwise                 -> fresh random seed (training)
-        new_seed = options.get("seed", None)
+        # Accept both Gym's reset(seed=...) API and per-worker reset options.
+        # DexJoCo tasks also use NumPy's global RNG for randomization.
+        new_seed = seed if seed is not None else options.get("seed", None)
         if new_seed is None:
             new_seed = np.random.randint(0, 2**31 - 1)
+        else:
+            self.seed(new_seed)
 
         raw_obs, _info = self.env.reset(seed=int(new_seed))
         return self.get_observation(raw_obs)

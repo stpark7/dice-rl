@@ -57,7 +57,6 @@ class TrainFlowMatchingImgAgent(TrainFlowMatchingAgent):
         shape_meta = cfg.shape_meta
         self.obs_dims = {k: shape_meta.obs[k]["shape"] for k in shape_meta.obs}
         log.info(f"TrainFlowMatchingImgAgent initialized with obs_dims: {self.obs_dims.keys()}")
-        self.val_freq = 100
 
     def run(self):
         timer = Timer()
@@ -107,7 +106,8 @@ class TrainFlowMatchingImgAgent(TrainFlowMatchingAgent):
                 reward_trajs = []
                 step_count = 0
                 max_steps = self.max_episode_steps
-                while not np.all(done_venv) and step_count < max_steps // self.horizon_steps:
+                max_chunks = (max_steps + self.act_steps - 1) // self.act_steps
+                while not np.all(done_venv) and step_count < max_chunks:
                     step_count += 1
                     with torch.no_grad():
                         cond = {}
@@ -125,18 +125,23 @@ class TrainFlowMatchingImgAgent(TrainFlowMatchingAgent):
                         output_venv = (
                             samples.trajectories.cpu().numpy()
                         )  # n_env x horizon x act
-                    action_venv = output_venv[:, : self.act_steps]
+                    remaining_steps = max_steps - (step_count - 1) * self.act_steps
+                    action_venv = output_venv[:, : min(self.act_steps, remaining_steps)]
                     
                     # Apply multi-step action
                     obs_venv, reward_venv, terminated_venv, truncated_venv, info_venv = (
                         self.venv.step(action_venv)
                     )
 
-                    reward_trajs.append(reward_venv)
-                    done_venv = terminated_venv | truncated_venv
+                    # Auto-reset workers may start another episode while others finish.
+                    reward_trajs.append(np.where(done_venv, 0, reward_venv))
+                    done_venv |= terminated_venv | truncated_venv
                     prev_obs_venv = obs_venv
                 
-                if step_count >= max_steps // self.horizon_steps:
+                if self.cfg.env.get("env_type") == "dexjoco" and self.n_render > 0:
+                    self.venv.call("stop_video")
+
+                if step_count >= max_chunks and not np.all(done_venv):
                     log.warning(f"Evaluation rollout hit max steps limit at epoch {self.epoch}. Done envs: {np.sum(done_venv)}/{self.n_envs}")
                 
                 reward_trajs = np.stack(reward_trajs, axis=-1)

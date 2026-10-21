@@ -6,19 +6,18 @@ Convert recorded Zarr states/actions and every camera in each episode's
 `videos/*.mp4` folder. Original recordings are left intact.
 
 ```console
-python script/dataset/process_dexjoco_dataset.py --task pick_bucket --with_images
+python script/dataset/process_dexjoco_dataset.py --task pick_bucket
 ```
 
 The default output is `data_dir/dexjoco/pick_bucket-img/`:
 
-- `images.zarr/<camera>`: RGB uint8 arrays `(T, 3, 96, 96)`, one array per
-  camera, compressed in 16-frame chunks. All cameras are saved, including
-  `ego_left` and `ego_right`; names and counts are discovered, not hardcoded.
 - `ph_pretrain/train.npz`: normalized `states`, `actions`, `traj_lengths`,
-  `camera_names`, and the relative `image_store` reference `../images.zarr`.
+  `camera_names`, and one RGB uint8 `images_<camera>` array `(T, 3, 96, 96)`
+  per recorded camera. All cameras are saved, including `ego_left` and
+  `ego_right`; names and counts are discovered, not hardcoded.
 - `ph_pretrain/normalization.npz`: state/action min/max statistics.
-- `ph_finetune/`: the existing residual-RL output format, referencing the same
-  image archive. Its existing terminal-success reward convention is unchanged;
+- `ph_finetune/`: the existing residual-RL output format with the same image
+  arrays. Its existing terminal-success reward convention is unchanged;
   recorded success labels are not imported by this converter.
 - `episodes.json`: source episode order, rejected episodes, prefix cuts,
   camera names, image size, and state/action dimensions.
@@ -28,8 +27,11 @@ prefix cut to all modalities and fails on differing frame counts or camera sets.
 Images are never normalized or resized in the loader. To generate another
 resolution, use `--image_size 128 --save_dir data_dir/dexjoco/pick_bucket-img-128`.
 An existing image dataset is not overwritten; choose a new output directory.
-Keep the NPZ directories and sibling `images.zarr` together when moving data.
-Without `--with_images`, the previous state-only output remains available.
+Both NPZ files carry a full copy of the images, so each file is self-contained
+and a task directory is about twice the size of its images. Conversion holds
+all cameras of one task in memory before writing.
+Every conversion saves images together with proprioceptive states and actions;
+camera videos are required and there is no image-saving flag.
 
 Choose cameras in the dataset configuration, in the order the model and online
 environment should receive them:
@@ -46,12 +48,13 @@ train_dataset:
   device: cpu
 ```
 
-The loader reads only requested observation frames and cameras; the full image
-archive is not copied to GPU. Omitting `image_keys` selects all cameras in the
-archive's recorded order. Legacy NPZ datasets with a single `images` array
-continue to work, but do not support named camera selection. Match environment
-`image_keys`, model `num_img`, input size (96), and crop size to the selection;
-the snippet above is a dataset example, not a complete training configuration.
+The loader decompresses only the selected cameras and keeps their frames
+resident on the dataset `device`; the other cameras are never read. Omitting
+`image_keys` selects all cameras in the recorded order. Legacy NPZ datasets
+with a single `images` array continue to work, but do not support named camera
+selection. Match environment `image_keys`, model `num_img`, input size (96),
+and crop size to the selection; the snippet above is a dataset example, not a
+complete training configuration.
 
 Bimanual conversion uses the same command with e.g. `--task bimanual_assembly`.
 Its `ego`, `wrist_left`, and `wrist_right` videos are discovered automatically.

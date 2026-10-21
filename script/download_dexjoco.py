@@ -10,13 +10,20 @@ import tarfile
 import tempfile
 
 
-DEFAULT_REPO = "robopark/dexjoco-image-data"
+DEFAULT_REPO = "robopark/dexjoco-single-arm-data"
 TASKS = (
-    "hammer_nail", "pick_bucket", "fold_glasses", "bimanual_assembly",
+    "click_mouse", "fold_glasses", "hammer_nail", "pick_bucket",
+    "pinch_tongs", "water_plant",
+)
+LEGACY_TASKS = (
+    "bimanual_assembly",
     "bimanual_hanoi", "bimanual_microwave_cook",
 )
+# Version 1 kept images in a sibling images.zarr; version 2 stores them inside
+# the NPZ files as images_<camera> arrays, which the loader now requires.
+MANIFEST_VERSION = 2
 REQUIRED_FILES = (
-    "episodes.json", "images.zarr/.zgroup", "images.zarr/.zattrs",
+    "episodes.json",
     "ph_pretrain/train.npz", "ph_pretrain/normalization.npz",
     "ph_finetune/train.npz", "ph_finetune/normalization.npz",
 )
@@ -30,8 +37,8 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def _check_layout(path):
-    missing = [name for name in REQUIRED_FILES if not (path / name).is_file()]
+def check_layout(path):
+    missing = [name for name in REQUIRED_FILES if not (Path(path) / name).is_file()]
     if missing:
         raise ValueError(f"Missing dataset files in {path}: {missing}")
 
@@ -43,7 +50,7 @@ def install_archive(archive, dataset_root, task, expected_sha256):
     makes an unchanged completed installation repeatable; it is not a substitute
     for an audit if the extracted files have subsequently been edited.
     """
-    if task not in TASKS:
+    if task not in TASKS + LEGACY_TASKS:
         raise ValueError(f"Unknown Dexjoco task: {task}")
     if sha256_file(archive) != expected_sha256:
         raise ValueError(f"SHA-256 checksum mismatch: {archive}")
@@ -55,7 +62,7 @@ def install_archive(archive, dataset_root, task, expected_sha256):
         if receipt_path.is_file():
             receipt = json.loads(receipt_path.read_text())
             if receipt.get("sha256") == expected_sha256:
-                _check_layout(target)
+                check_layout(target)
                 return target
         raise FileExistsError(
             f"Refusing to overwrite {target}. Choose a different --data-dir "
@@ -79,7 +86,7 @@ def install_archive(archive, dataset_root, task, expected_sha256):
                     with source.extractfile(member) as data, destination.open("xb") as output:
                         shutil.copyfileobj(data, output)
         extracted = staging / directory_name
-        _check_layout(extracted)
+        check_layout(extracted)
         (extracted / ".hf_release.json").write_text(
             json.dumps({"task": task, "sha256": expected_sha256}, indent=2) + "\n"
         )
@@ -91,25 +98,38 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-id", default=DEFAULT_REPO)
     parser.add_argument("--revision", default="main", help="HF commit, tag, or branch")
-    parser.add_argument("--task", action="append", choices=TASKS,
-                        help="Repeat for selected tasks; defaults to all six")
-    parser.add_argument("--data-dir", default=os.environ.get("DICE_RL_DATA_DIR"))
+    parser.add_argument("--task", action="extend", nargs="+", choices=TASKS + LEGACY_TASKS,
+                        help="One or more tasks; may be repeated; defaults to all tasks in the manifest")
+    parser.add_argument("--data-dir", default=os.environ.get("DICE_RL_DATA_DIR") or
+                        str(Path(__file__).resolve().parents[1] / "data_dir"))
     parser.add_argument("--cache-dir", default=None, help="Optional HF archive cache")
     args = parser.parse_args(argv)
     if not args.data_dir:
         parser.error("Set DICE_RL_DATA_DIR or pass --data-dir")
 
-    # Uses HF_TOKEN or the standard local HF login. Never put tokens in scripts.
+    # Public releases need no token; private legacy releases use standard HF login.
     from huggingface_hub import HfApi, hf_hub_download
 
     revision = HfApi().dataset_info(args.repo_id, revision=args.revision).sha
     common = dict(repo_id=args.repo_id, repo_type="dataset", revision=revision,
                   cache_dir=args.cache_dir)
     manifest = json.loads(Path(hf_hub_download(filename="manifest.json", **common)).read_text())
-    if manifest.get("format_version") != 1:
-        raise ValueError("Unsupported Dexjoco release manifest version")
+    if manifest.get("format_version") != MANIFEST_VERSION:
+        raise ValueError(
+            f"Unsupported Dexjoco release manifest version {manifest.get('format_version')}; "
+            f"this code installs version {MANIFEST_VERSION} (images inside the NPZ files)"
+        )
     print(f"Dataset: {args.repo_id}@{revision}", flush=True)
-    for task in dict.fromkeys(args.task or TASKS):
+    selected_tasks = list(dict.fromkeys(args.task or manifest["tasks"]))
+    for task in selected_tasks:
+        if task not in TASKS + LEGACY_TASKS:
+            raise ValueError(f"Unsupported Dexjoco task in manifest: {task}")
+        if task not in manifest["tasks"]:
+            raise ValueError(
+                f"Task not available in {args.repo_id}: {task}. "
+                f"Available tasks: {', '.join(manifest['tasks'])}"
+            )
+    for task in dict.fromkeys(args.task or manifest["tasks"]):
         entry = manifest["tasks"][task]
         print(f"Downloading and checking {task} ...", flush=True)
         archive = hf_hub_download(filename=entry["archive"], **common)
