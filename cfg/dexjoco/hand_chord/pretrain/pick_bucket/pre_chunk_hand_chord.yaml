@@ -1,0 +1,55 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.hand_chord.train_chunk_hand_chord_agent.TrainChunkHandChordAgent
+
+name: ${env_name}_pre_chunk_hand_chord_h${horizon_steps}_k${latent_dim}
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-handchord/pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/train.npz
+normalization_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
+
+env_name: pick_bucket
+seed: 42
+device: cuda:0
+horizon_steps: 16
+latent_dim: 32
+wandb:
+  project: dexjoco-${env_name}-handchord
+  run: chord_h${horizon_steps}_k${latent_dim}_seed${seed}_${now:%H-%M-%S}
+
+train:
+  n_steps: 20000
+  batch_size: 128
+  learning_rate: 3e-4
+  weight_decay: 1e-4
+  val_freq: 1000
+  save_model_freq: 1000
+  log_freq: 100
+  max_grad_norm: 1.0
+  kl_max: 3e-4
+  kl_zero_steps: 4000
+  kl_ramp_steps: 4000
+
+model:
+  _target_: model.hand_chord.chunk_hand_chord.ChunkHandActionChord
+  raw_action_dim: 22
+  hand_dim: 16
+  state_dim: 23
+  hand_state_start: 7
+  normalization_path: ${normalization_path}
+  horizon_steps: ${horizon_steps}
+  latent_dim: ${latent_dim}
+  width: 128
+  layers: 3
+  heads: 4
+  dropout: 0.0
+  reconstruction_weight: 1.0
+  huber_delta: 1.0
+
+train_dataset:
+  dataset_path: ${train_dataset_path}
+  max_n_episodes: 50
+  val_fraction: 0.1
+  split_seed: ${seed}

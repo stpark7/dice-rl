@@ -4,6 +4,7 @@ Launcher for all experiments
 
 import os
 import sys
+from pathlib import Path
 import pretty_errors
 import logging
 
@@ -11,6 +12,9 @@ import math
 import hydra
 from omegaconf import OmegaConf
 import gdown
+
+# Direct launches must resolve repository packages without requiring PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # only if you’re sure this runs before any CUDA use
 

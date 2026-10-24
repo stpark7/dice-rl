@@ -1,5 +1,11 @@
 # DexJoCo image BC task configurations
 
+Hand Chord VAE pretraining configurations live in
+`hand_chord/pretrain/<task>/`. Results are saved under
+`$DICE_RL_LOG_DIR/dexjoco-handchord/pretrain/` (default log root: `log_dir`).
+See [Hand Chord training](../../docs/HAND_CHORD_TRAINING.md) for the model,
+dataset requirements, commands, and checkpoint format.
+
 The five task configs in `pretrain/<task>/pre_flow_matching_unet_img.yaml`
 are standalone. Each file contains its task, environment, model, dataset, and
 training settings; no shared base config is required.
