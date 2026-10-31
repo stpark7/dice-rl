@@ -14,7 +14,7 @@ env_name: pick_bucket
 seed: 42
 device: cuda:0
 horizon_steps: 16
-latent_dim: 32
+latent_dim: 8
 wandb:
   project: dexjoco-${env_name}-handchord
   run: chord_h${horizon_steps}_k${latent_dim}_seed${seed}_${now:%H-%M-%S}
@@ -24,7 +24,7 @@ train:
   batch_size: 128
   learning_rate: 3e-4
   weight_decay: 1e-4
-  val_freq: 1000
+  val_freq: 500
   save_model_freq: 1000
   log_freq: 100
   max_grad_norm: 1.0
@@ -50,6 +50,6 @@ model:
 
 train_dataset:
   dataset_path: ${train_dataset_path}
-  max_n_episodes: 50
+  max_n_episodes: 100
   val_fraction: 0.1
   split_seed: ${seed}

@@ -1,0 +1,180 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+  job:
+    chdir: false
+_target_: agent.finetune.train_distill_residual_flow_img_agent.TrainDistillResidualFlowImgAgent
+
+name: ${env_name}_ft_distill_residual_flow_unet_img_demos99_base800_ta${horizon_steps}_fl${flow_steps}
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+# 99-demo BC run: epoch 800, recorded success 90/100 (model weights).
+# Use the shared dataset normalization from data_dir.
+pretrained_run_dir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-pretrain/pretrained_bc_policy_click_mouse_img
+base_policy_path: ${pretrained_run_dir}/checkpoint/state_800.pt
+normalization_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: click_mouse
+run_eval: true
+obs_dim: 23  # The agent appends the frozen policy's 128 visual features.
+action_dim: 22
+use_6d_rot: false
+abs_action: false
+flow_steps: 10
+cond_steps: 1
+img_cond_steps: 1
+horizon_steps: 16
+act_steps: 16
+noise_dim: 352  # action_dim * horizon_steps = 22 * 16
+
+env:
+  n_envs: 16
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 600  # Match the selected checkpoint's BC evaluation.
+  save_video: true
+  use_image_obs: true
+  env_type: dexjoco
+  wrappers:
+    dexjoco_image:
+      normalization_path: ${normalization_path}
+      success_steps_before_termination: 1
+      image_keys: [front, wrist]
+      low_dim_keys: [tcp_pose, gripper_pose]
+      shape_meta: ${shape_meta}
+      task_name: ${env_name}
+      policy_mode: true
+      randomize: false
+      render_mode: rgb_array
+      realtime: false
+      max_episode_steps: ${env.max_episode_steps}
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+      gamma: ${train.gamma}
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [96, 96, 6]
+    state:
+      shape: [23]
+  action:
+    shape: [22]
+
+wandb:
+  entity: null
+  project: dexjoco-${env_name}-distill-residual-flow-img
+  run: ${now:%Y-%m-%d_%H-%M-%S_%f}_${name}
+
+train:
+  # Vector rollout calls; each call executes up to n_envs * act_steps simulator steps.
+  num_train_steps: 50000
+  # Required by TrainAgent; the residual trainer uses num_train_steps/eval_freq.
+  val_freq: 10
+  n_steps: 100
+  n_train_itr: 1000
+  batch_size: 256
+  eval_freq: 1000
+  gamma: 0.99
+  tau: 0.01
+  update_freq: 1
+  gradient_steps: 10
+
+  actor_lr: 1e-4
+  critic_lr: 1e-4
+  actor_weight_decay: 1e-5
+  critic_weight_decay: 1e-5
+
+  use_lr_scheduler: true
+  lr_scheduler:
+    first_cycle_steps: 1000
+    warmup_steps: 10
+    min_lr: 1e-6
+
+  actor_update_freq: 2
+  critic_target_update_freq: 2
+  save_freq: 1000  # Residual trainer checkpoint interval in rollout calls.
+  save_model_freq: 100  # Required by TrainAgent.
+  render:
+    freq: 1
+    num: 2  # Total videos per evaluation, recorded in its first batch only.
+  log_freq: 1
+  max_grad_norm: 1.0
+
+replay_buffer:
+  max_size: 2000000
+  use_n_step: true
+  n_step: 3
+  expert_use_n_step: ${expert_dataset.use_n_step}
+  expert_n_step: ${expert_dataset.n_step}
+
+use_rlpd: true
+expert_ratio: 0.3  # Used when adaptive expert sampling is disabled.
+use_adaptive_expert_ratio: true
+adaptive_expert_ratio_start: 0.7
+adaptive_expert_ratio_end: 0.1
+adaptive_expert_ratio_steps: 10000
+
+model:
+  _target_: model.rl.distill_residual_rl_img.DistillResidualRLImgModel
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  noise_dim: ${noise_dim}
+  cond_steps: ${cond_steps}
+  horizon_steps: ${horizon_steps}
+  device: ${device}
+  condition_residual_on_base_action: false
+  num_multi_z_for_actor_loss: 16
+  use_n_step: ${replay_buffer.use_n_step}
+  n_step: ${replay_buffer.n_step}
+  pretrained_flow_policy_path: ${base_policy_path}
+  actor_hidden_dims: [1024, 1024, 1024]
+  critic_hidden_dims: [1024, 1024, 1024]
+  activation_type: GELU
+  use_layernorm: true
+  bc_loss_weight: 50.0
+  critic_weight: 1.0
+  use_soft_q_filtering: true
+  q_filtering_warmup_steps: 2000
+  q_underestimation_threshold: -0.5
+  replay_flow_warmup_steps: 3000
+  use_q_normalization: true
+  disable_q_loss_for_expert_data: true
+  always_retain_bc_loss_for_expert_data: true
+  multi_sample_next_noise: true
+  num_next_noise_samples: 4
+  critic_ensemble_size: 10
+
+expert_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceQLearningDataset
+  dataset_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_finetune/train.npz
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  img_cond_steps: ${img_cond_steps}
+  device: cpu
+  image_keys: ${env.wrappers.dexjoco_image.image_keys}
+  discount_factor: ${train.gamma}
+  gamma: ${train.gamma}
+  max_n_episodes: 99  # Actual count in the nominal demos100 BC run.
+  use_img: true
+  success_steps_for_termination: ${env.wrappers.dexjoco_image.success_steps_before_termination}
+  use_n_step: true
+  n_step: 3
+  use_6d_rot: ${use_6d_rot}
+  abs_action: ${abs_action}
+
+visualize_trajectories: false
+visualization_freq: 200000000
+# 13 batches * 8 environments = 104 episodes, seeds 10000-10103.
+num_eval_episodes: 13
+eval_n_envs: 8
+log_q_overestimation: true
+online_explore_strategy: max_q_min
+evaluate_strategy: max_q_min
+num_exploration_samples: 16
