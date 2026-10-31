@@ -55,6 +55,7 @@ class HybridReplayBuffer:
         # Expert dataset n-step settings
         expert_use_n_step: bool = False,
         expert_n_step: int = 1,
+        noise_action_dim: Optional[int] = None,
     ):
         """
         Initialize hybrid replay buffer with episode and chunk storage.
@@ -81,6 +82,7 @@ class HybridReplayBuffer:
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.noise_dim = noise_dim
+        self.noise_action_dim = action_dim if noise_action_dim is None else noise_action_dim
         self.n_envs = n_envs
         self.cond_steps = cond_steps
         self.horizon_steps = horizon_steps
@@ -476,7 +478,7 @@ class HybridReplayBuffer:
             assert torch.all(n_step_rewards < 15), f"N-step rewards exceed 15: max={max_reward:.2f}"
             
             # Generate random noise
-            noises = torch.randn(batch_size, self.horizon_steps, self.action_dim, device=self.device)
+            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
             
             # n_step and data source
             n_steps_tensor = torch.ones(batch_size, 1, device=self.device, dtype=torch.long) * self.n_step
@@ -510,7 +512,7 @@ class HybridReplayBuffer:
             indices = np.random.randint(0, self.size, size=batch_size)
             
             # Generate random noise for consistency with standard buffer
-            noises = torch.randn(batch_size, self.horizon_steps, self.action_dim, device=self.device)
+            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
             
             # Default n_step=1 and data source for online data
             n_steps_tensor = torch.ones(batch_size, 1, device=self.device, dtype=torch.long)
@@ -616,7 +618,7 @@ class HybridReplayBuffer:
                             for transition in expert_batch])
         
         # Generate random noise for expert transitions (needed for consistency)
-        noises = torch.randn(batch_size, self.horizon_steps, self.action_dim, device=self.device)
+        noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
         
         # Expert data uses its configured n_step value (can differ from online data)
         # The expert dataset handles n-step computation in its __getitem__ method

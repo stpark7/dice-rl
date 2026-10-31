@@ -21,6 +21,18 @@ from env.gym_utils import make_async
 log = logging.getLogger(__name__)
 
 
+def _prepare_image_model_config(cfg, pretrained_config):
+    """Restore raw state width before augmenting a saved config.
+
+    Hydra's config has raw obs_dim, while the checkpoint's stored agent config
+    already includes visual features. Both must produce the same model width.
+    """
+    raw_obs_dim = cfg.shape_meta.obs.state.shape[0]
+    visual_feature_dim = pretrained_config.model.network.visual_feature_dim
+    cfg.obs_dim = raw_obs_dim + visual_feature_dim
+    return raw_obs_dim, visual_feature_dim
+
+
 def _extract_visual_features_from_obs(obs_venv, pretrained_model, device):
     """
     Extract visual features from raw observations using pretrained model.
@@ -270,7 +282,7 @@ def main():
         "--num_eval_episodes",
         type=int,
         default=10,
-        help="Number of episodes to evaluate",
+        help="Number of evaluation rounds (total episodes = rounds * eval_n_envs)",
     )
     parser.add_argument(
         "--eval_n_envs",
@@ -319,6 +331,7 @@ def main():
     
     # Override some config values for evaluation
     cfg.device = args.device
+    cfg.model.device = args.device
     
     # Determine if this is image-based or state-based
     use_image_obs = cfg.env.get("use_image_obs", False)
@@ -362,12 +375,10 @@ def main():
             network_target = pretrained_config.model.network._target_
             
             # For ResNet models: use visual_feature_dim directly
-            visual_feature_dim = pretrained_config.model.network.visual_feature_dim
+            original_obs_dim, visual_feature_dim = _prepare_image_model_config(cfg, pretrained_config)
             model_type = "VisionResNetDiffusionMLP" if "Diffusion" in network_target else "VisionResNetFlowMatchingMLP"
             print(f"  Using {model_type} visual_feature_dim: {visual_feature_dim}")
 
-            # Update obs_dim to include visual features
-            cfg.obs_dim = visual_feature_dim + original_obs_dim
             print(f"Image-based model obs_dim update:")
             print(f"  Original obs_dim: {original_obs_dim}")
             print(f"  Visual feature dim: {visual_feature_dim}")

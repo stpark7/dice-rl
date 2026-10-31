@@ -260,6 +260,8 @@ class DistillResidualRLModel(nn.Module):
         condition_residual_on_base_action: bool = False,
         # Device
         device: str = "cuda",
+        # Optional prebuilt residual actor
+        actor: Optional[nn.Module] = None,
         **kwargs
     ):
         super().__init__()
@@ -300,16 +302,18 @@ class DistillResidualRLModel(nn.Module):
         # Initialize networks with explicit dimensions for chunked data
         use_layernorm_val = kwargs.pop('use_layernorm', True)
 
-        self.actor = DistilledActor(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            cond_steps=cond_steps,
-            horizon_steps=horizon_steps,
-            hidden_dims=actor_hidden_dims,
-            activation_type=activation_type,
-            use_layernorm=use_layernorm_val,
-            **kwargs
-        ).to(device)
+        if actor is None:
+            actor = DistilledActor(
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                cond_steps=cond_steps,
+                horizon_steps=horizon_steps,
+                hidden_dims=actor_hidden_dims,
+                activation_type=activation_type,
+                use_layernorm=use_layernorm_val,
+                **kwargs
+            )
+        self.actor = actor.to(device)
         
         self.critic = DistilledCritic(
             obs_dim=obs_dim,
@@ -416,7 +420,8 @@ class DistillResidualRLModel(nn.Module):
         
         # Load the checkpoint
         log.info(f"Loading pretrained policy weights from: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        # BC checkpoints also store numpy RNG state, which weights_only=True rejects.
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         # Load the model state dict (use 'model' key like eval_agent.py)
         if 'model' in ckpt:
