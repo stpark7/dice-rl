@@ -50,7 +50,7 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
         log.info(f"Loading pretrained config from: {pretrained_config_path}")
         
         pretrained_config = OmegaConf.load(pretrained_config_path)
-        
+
         # Verify dataset configuration matches
         pretrained_dataset_path = pretrained_config.train_dataset_path
         current_dataset_path = cfg.expert_dataset.dataset_path
@@ -156,6 +156,8 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             log.info(f"Expert dataset pre-processed: {len(expert_dataset_with_features)} transitions")
         
         # Create replay buffer with augmented obs_dim
+        # TODO: If GPU memory becomes insufficient, support CPU replay storage
+        # and move sampled batches to the model device before training.
         self.replay_buffer = HybridReplayBuffer(
             obs_dim=self.obs_dim,  # This is now augmented (visual_feature_dim + original_obs_dim)
             action_dim=self.action_dim,

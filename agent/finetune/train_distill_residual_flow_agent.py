@@ -466,7 +466,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 seed_idx = episode * self.eval_n_envs + env_idx
                 options_venv[env_idx]["seed"] = self.eval_seeds[seed_idx]
             
-            if self.render_video:
+            if self.render_video and episode == 0:
                 for env_ind in range(self.n_render):
                     options_venv[env_ind]["video_path"] = os.path.join(
                         self.render_dir, f"{total_steps}_eval_episode-{episode}_env-{env_ind}.mp4"
@@ -912,7 +912,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         
         while total_steps < self.num_train_steps:
             # Run evaluation and visualization (if evaluation is enabled)
-            if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv') and total_steps % self.eval_freq == 0:
+            # Skip step 0: the residual is untrained, so the pretrained eval above already covers it
+            if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv') and total_steps > 0 and total_steps % self.eval_freq == 0:
                 # Evaluate and collect trajectories if visualization is enabled
                 if self.visualize_trajectories and total_steps % self.visualization_freq == 0:
                     eval_reward, eval_success, eval_trajectories = self.evaluate(total_steps, collect_trajectories=True)
