@@ -27,7 +27,7 @@ dependencies = [
     "scipy==1.10.1",
     "torch>=2.4.0,<2.8.0",
     "tqdm==4.66.5",
-    "wandb==0.17.7",
+    "wandb==0.19.11",
     "zarr==2.18.3"
 ]
 

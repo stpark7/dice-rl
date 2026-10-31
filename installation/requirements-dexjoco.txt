@@ -1,0 +1,9 @@
+# Run from the dice-rl repository root, inside the dice-rl Conda environment.
+--extra-index-url https://download.pytorch.org/whl/cu128
+-e .
+-e ../dexjoco/dexjoco
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+numcodecs==0.13.1
+opencv-python==4.11.0.86
+h5py==3.16.0

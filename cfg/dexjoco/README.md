@@ -1,10 +1,20 @@
 # DexJoCo image BC task configurations
 
-Hand Chord VAE pretraining configurations live in
-`hand_chord/pretrain/<task>/`. Results are saved under
-`$DICE_RL_LOG_DIR/dexjoco-handchord/pretrain/` (default log root: `log_dir`).
-See [Hand Chord training](../../docs/HAND_CHORD_TRAINING.md) for the model,
-dataset requirements, commands, and checkpoint format.
+HandChord training configurations live in `hand_chord/pretrain/<task>/` and
+write pretrained codecs under `$DICE_RL_LOG_DIR/dexjoco-handchord/pretrain/`
+(default log root: `log_dir`). Each task has one `pre_chunk_hand_chord.yaml`;
+pass the BC normalizer path and demonstration count as launch overrides.
+Residual RL configs live in `finetune/<task>/`. Use
+`ft_distill_residual_flow_unet_img` for raw actions, or
+`ft_hand_chord_residual_flow_unet_img` for the frozen HandChord model. The
+HandChord config is standalone and includes its task settings, model, and checkpoint;
+override `model.chord_path` to use another pretrained codec. PinchTongs and
+WaterPlant require this path explicitly. The codec's architecture and latent
+dimension come from its checkpoint. Both variants select `evaluate_strategy:
+max_q_min`; the existing 3000-rollout warmup is preserved. Finetuning paths honor
+`DICE_RL_DATA_DIR` and `DICE_RL_LOG_DIR`. See [MYREADME](../../MYREADME.md#finetuning)
+for the prepared checkpoint layout and one-command launches, and
+[HandChord training](../../docs/HAND_CHORD_TRAINING.md) for codec pretraining.
 
 The five task configs in `pretrain/<task>/pre_flow_matching_unet_img.yaml`
 are standalone. Each file contains its task, environment, model, dataset, and
