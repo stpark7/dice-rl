@@ -1,9 +1,9 @@
 """
 Image-based finetune agent for distilled flow matching policies.
 
-This agent extends TrainDistillFlowAgent to handle image observations by:
-1. Using the visual feature extraction and merging in the environment wrapper
-2. Using standard ReplayBuffer with augmented state dimension
+This agent extends TrainDistillResidualFlowAgent to handle image observations by:
+1. Extracting and merging visual features in the agent
+2. Using HybridReplayBuffer with augmented state dimension and CPU storage
 3. Pre-processing expert dataset with merged visual features + state
 4. Maximizing inheritance from parent class
 """
@@ -28,7 +28,7 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
     Image-based distilled flow matching agent.
 
     Extends TrainDistillResidualFlowAgent to handle image observations with visual features
-    merged into the state by the environment wrapper.
+    merged into the state before replay storage.
     """
     
     def __init__(self, cfg):
@@ -143,7 +143,7 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
     def _setup_replay_buffer(self, cfg):
         """
         Override parent's replay buffer setup to handle expert dataset preprocessing.
-        Uses standard ReplayBuffer but with augmented obs_dim.
+        Stores augmented observations in HybridReplayBuffer on the configured storage device.
         """
         # Pre-process expert dataset if RLPD is enabled
         expert_dataset_with_features = None
@@ -151,13 +151,13 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             # Pre-process expert dataset to include merged visual features + state
             log.info("Pre-processing expert dataset with visual features...")
             expert_dataset_with_features = self._preprocess_expert_dataset(
-                hydra.utils.instantiate(cfg.expert_dataset)
+                hydra.utils.instantiate(
+                    cfg.expert_dataset, device=cfg.replay_buffer.get("storage_device", "cpu")
+                )
             )
             log.info(f"Expert dataset pre-processed: {len(expert_dataset_with_features)} transitions")
         
         # Create replay buffer with augmented obs_dim
-        # TODO: If GPU memory becomes insufficient, support CPU replay storage
-        # and move sampled batches to the model device before training.
         self.replay_buffer = HybridReplayBuffer(
             obs_dim=self.obs_dim,  # This is now augmented (visual_feature_dim + original_obs_dim)
             action_dim=self.action_dim,
@@ -167,6 +167,8 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             cond_steps=self.cond_steps,
             horizon_steps=self.horizon_steps,
             device=self.device,
+            storage_device=cfg.replay_buffer.get("storage_device", "cpu"),
+            pin_memory=cfg.replay_buffer.get("pin_memory", True),
             gamma=cfg.train.get("gamma", 0.99),
             log_q_overestimation=cfg.get("log_q_overestimation", False),
             # RLPD settings
@@ -201,6 +203,8 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
         pretrained_model.eval()
         
         processed_transitions = []
+        storage_device = self.cfg.replay_buffer.get("storage_device", "cpu")
+        from agent.dataset.sequence import Transition
         
         # Process in batches to save memory
         batch_size = 32
@@ -249,42 +253,40 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
                 }
                 next_merged_features = pretrained_model.network.extract_visual_features(next_cond)
             
-            # Create processed transitions with merged features
-            for j, transition in enumerate(batch_transitions):
-                # Get original state (for concatenation with visual features)
-                original_state = states_tensor[j]  # On the feature extraction device
-                original_next_state = next_states_tensor[j]
-                
-                # Merge visual features with original state
-                # The merged_features already contains processed visual+state, but we need to 
-                # concatenate with original state to match wrapper's output format
-                visual_feat = merged_features[j] # (feature_dim,)
-                next_visual_feat = next_merged_features[j]
-                
-                augmented_state = torch.cat([
-                    original_state,
-                    visual_feat.unsqueeze(0).repeat(self.cond_steps, 1)
-                ], dim=-1)  # (cond_steps, augmented_obs_dim)
-                
-                augmented_next_state = torch.cat([
-                    original_next_state,
-                    next_visual_feat.unsqueeze(0).repeat(self.cond_steps, 1)
-                ], dim=-1)
+            # Merge and transfer complete feature batches before creating row views.
+            # This keeps cached expert features off the GPU and avoids per-row copies.
+            augmented_states = torch.cat([
+                states_tensor,
+                merged_features.unsqueeze(1).expand(-1, self.cond_steps, -1),
+            ], dim=-1).detach().to(storage_device)
+            augmented_next_states = torch.cat([
+                next_states_tensor,
+                next_merged_features.unsqueeze(1).expand(-1, self.cond_steps, -1),
+            ], dim=-1).detach().to(storage_device)
+            actions = torch.stack([
+                torch.as_tensor(transition.actions) for transition in batch_transitions
+            ]).detach().to(storage_device)
+            rewards = torch.stack([
+                torch.as_tensor(transition.rewards) for transition in batch_transitions
+            ]).detach().to(storage_device)
+            dones = torch.stack([
+                torch.as_tensor(transition.dones) for transition in batch_transitions
+            ]).detach().to(storage_device)
+            mc_returns = torch.stack([
+                torch.as_tensor(transition.mc_return if hasattr(transition, 'mc_return') else transition.rewards)
+                for transition in batch_transitions
+            ]).detach().to(storage_device)
 
-                # Create new transition with augmented states
-                from collections import namedtuple
-                # Use same Transition structure as parent expects
-                from agent.dataset.sequence import Transition
-                
+            for j, transition in enumerate(batch_transitions):
                 processed_transition = Transition(
-                    actions=transition.actions,
+                    actions=actions[j],
                     conditions={
-                        'state': augmented_state,
-                        'next_state': augmented_next_state
+                        'state': augmented_states[j],
+                        'next_state': augmented_next_states[j]
                     },
-                    rewards=transition.rewards,
-                    dones=transition.dones,
-                    mc_return=transition.mc_return if hasattr(transition, 'mc_return') else transition.rewards
+                    rewards=rewards[j],
+                    dones=dones[j],
+                    mc_return=mc_returns[j],
                 )
                 
                 processed_transitions.append(processed_transition)
@@ -406,7 +408,9 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
                 init_obs_batch = {k: np.array([v]) for k, v in traj['initial_obs'].items()}
                 
                 # Extract visual features - returns tensor with batch dim
-                augmented_init = self._extract_visual_features_from_obs(init_obs_batch)
+                augmented_init = self._extract_visual_features_from_obs(init_obs_batch).detach().to(
+                    self.replay_buffer.device
+                )
                 # Remove batch dimension but keep as tensor
                 processed_traj['initial_obs'] = augmented_init[0]
             
@@ -419,7 +423,9 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
                 obs_batch[key] = np.array([obs[key] for obs in traj['observations']])
             
             # Extract visual features for all observations at once
-            augmented_obs = self._extract_visual_features_from_obs(obs_batch)
+            augmented_obs = self._extract_visual_features_from_obs(obs_batch).detach().to(
+                self.replay_buffer.device
+            )
             
             # Split back into list of individual observations (keep as tensors)
             for i in range(len(traj['observations'])):

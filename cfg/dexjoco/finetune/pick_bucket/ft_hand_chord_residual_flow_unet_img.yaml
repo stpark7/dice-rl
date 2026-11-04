@@ -109,6 +109,8 @@ train:
   max_grad_norm: 1.0
 
 replay_buffer:
+  storage_device: cpu
+  pin_memory: true  # Pin sampled batches only, not the full replay storage.
   max_size: 2000000
   use_n_step: true
   n_step: 3

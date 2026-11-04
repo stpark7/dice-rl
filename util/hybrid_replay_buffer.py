@@ -7,7 +7,7 @@ fast vectorized sampling while respecting episode boundaries.
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Iterator, List, Tuple, Optional, Any
 import logging
 from torch.utils.data import WeightedRandomSampler, DataLoader, Sampler
 
@@ -56,6 +56,8 @@ class HybridReplayBuffer:
         expert_use_n_step: bool = False,
         expert_n_step: int = 1,
         noise_action_dim: Optional[int] = None,
+        storage_device: str = "cpu",
+        pin_memory: bool = True,
     ):
         """
         Initialize hybrid replay buffer with episode and chunk storage.
@@ -68,7 +70,10 @@ class HybridReplayBuffer:
             n_envs: Number of parallel environments
             cond_steps: Number of observation history steps
             horizon_steps: Action horizon for chunking (e.g., 8)
-            device: Device for tensor storage
+            device: Device for returned training batches
+            storage_device: Device for episode, chunk, and sampling computations
+            pin_memory: Use pinned batch staging for asynchronous CPU-to-CUDA copies.
+                The full replay storage remains pageable to avoid locking gigabytes of RAM.
             gamma: Discount factor for MC return computation (NOT for within-chunk rewards)
             log_q_overestimation: Whether to compute MC returns
             use_rlpd: Whether to use RLPD sampling
@@ -87,7 +92,17 @@ class HybridReplayBuffer:
         self.cond_steps = cond_steps
         self.horizon_steps = horizon_steps
         self.max_size = max_size
-        self.device = device
+        self.device = torch.device(storage_device)
+        self.sample_device = torch.device(device)
+        # Resolve bare "cuda" once so later current-device changes cannot mix GPUs.
+        if self.device.type == "cuda" and self.device.index is None:
+            self.device = torch.device("cuda", torch.cuda.current_device())
+        if self.sample_device.type == "cuda" and self.sample_device.index is None:
+            self.sample_device = torch.device("cuda", torch.cuda.current_device())
+        self.pin_memory = bool(
+            pin_memory and self.device.type == "cpu" and self.sample_device.type == "cuda"
+        )
+        device = self.device
         self.gamma = gamma
         self.log_q_overestimation = log_q_overestimation
         self.use_n_step = use_n_step
@@ -140,6 +155,8 @@ class HybridReplayBuffer:
         log.info(f"  Horizon steps: {horizon_steps}")
         log.info(f"  Cond steps: {cond_steps}")
         log.info(f"  Parallel envs: {n_envs}")
+        log.info(f"  Storage device: {self.device}; sample device: {self.sample_device}")
+        log.info(f"  Pinned batch staging: {self.pin_memory}")
         if use_rlpd and expert_dataset:
             log.info(f"  RLPD enabled with expert_ratio={expert_ratio}")
             log.info(f"  Expert dataset size: {len(expert_dataset)}")
@@ -179,6 +196,9 @@ class HybridReplayBuffer:
             # Fallback to standard chunked storage if no full trajectory data
             log.warning("No full trajectory info provided, skipping")
             return
+
+        # Read flags on CPU once instead of synchronizing once per environment.
+        done = done.detach().cpu()
         
         # Process each environment's trajectory data
         for env_idx in range(self.n_envs):
@@ -240,9 +260,9 @@ class HybridReplayBuffer:
                 self.ongoing_episodes[env_idx] = None
     
     def _to_tensor(self, data):
-        """Convert data to tensor if needed."""
+        """Keep episode data detached on the storage device."""
         if isinstance(data, torch.Tensor):
-            return data.to(self.device)
+            return data.detach().to(self.device)
         elif isinstance(data, dict):
             # For dict observations, recursively convert each value
             return {k: self._to_tensor(v) for k, v in data.items()}
@@ -399,10 +419,65 @@ class HybridReplayBuffer:
             - n_steps: (batch_size, 1) - number of steps (for n-step returns)
             - data_source: (batch_size, 1) - 0 for online, 1 for expert
         """
+        return next(self.sample_batches(batch_size, 1, expert_ratio))
+
+    def sample_batches(
+        self, batch_size: int, num_batches: int, expert_ratio: Optional[float] = None,
+    ) -> Iterator[Tuple[torch.Tensor, ...]]:
+        """Sample an update group and transfer it once per dtype, then yield batches.
+
+        Sampling with replacement is unchanged. RLPD rounds expert counts per
+        minibatch, including when the expert ratio is scheduled. Only this update
+        group's data occupies CUDA/pinned memory, independent of buffer capacity.
+        """
+        if batch_size <= 0 or num_batches <= 0:
+            raise ValueError("batch_size and num_batches must be positive")
         if self.use_rlpd and self.expert_dataset is not None:
-            return self._sample_rlpd(batch_size, expert_ratio)
+            batch = self._sample_rlpd(batch_size, expert_ratio, num_batches=num_batches)
         else:
-            return self._sample_standard(batch_size)
+            batch = self._sample_standard(batch_size * num_batches)
+        batch = self._transfer_batch(batch)
+        # Expert-only warm-up can return fewer transitions than requested, as in sample().
+        actual_batch_size = batch[0].shape[0] // num_batches
+        for batch_idx in range(num_batches):
+            start = batch_idx * actual_batch_size
+            yield tuple(field.narrow(0, start, actual_batch_size) for field in batch)
+
+    def _transfer_batch(self, batch: Tuple[torch.Tensor, ...]) -> Tuple[torch.Tensor, ...]:
+        """Pack fields by dtype into bounded staging slabs before device transfer.
+
+        Advanced indexing returns pageable tensors even from pinned storage. Copy
+        directly into pinned slabs here instead of pinning individual samples or
+        the entire replay. Fresh slabs use PyTorch's host allocator, which tracks
+        outstanding asynchronous copies before recycling their memory.
+        """
+        if all(field.device == self.sample_device for field in batch):
+            return batch
+        if self.device.type != "cpu" or self.sample_device.type != "cuda":
+            return tuple(field.to(self.sample_device) for field in batch)
+
+        groups = {}
+        for index, field in enumerate(batch):
+            if field.device != self.sample_device:
+                groups.setdefault(field.dtype, []).append(index)
+        result = list(batch)
+        for dtype, indices in groups.items():
+            slab = torch.empty(
+                sum(batch[index].numel() for index in indices),
+                dtype=dtype, device="cpu", pin_memory=self.pin_memory,
+            )
+            offset = 0
+            for index in indices:
+                field = batch[index]
+                slab.narrow(0, offset, field.numel()).view(field.shape).copy_(field)
+                offset += field.numel()
+            device_slab = slab.to(self.sample_device, non_blocking=self.pin_memory)
+            offset = 0
+            for index in indices:
+                field = batch[index]
+                result[index] = device_slab.narrow(0, offset, field.numel()).view(field.shape)
+                offset += field.numel()
+        return tuple(result)
     
     def _sample_standard(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
         """Sample from online data only."""
@@ -478,7 +553,7 @@ class HybridReplayBuffer:
             assert torch.all(n_step_rewards < 15), f"N-step rewards exceed 15: max={max_reward:.2f}"
             
             # Generate random noise
-            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
+            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.sample_device)
             
             # n_step and data source
             n_steps_tensor = torch.ones(batch_size, 1, device=self.device, dtype=torch.long) * self.n_step
@@ -512,7 +587,7 @@ class HybridReplayBuffer:
             indices = np.random.randint(0, self.size, size=batch_size)
             
             # Generate random noise for consistency with standard buffer
-            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
+            noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.sample_device)
             
             # Default n_step=1 and data source for online data
             n_steps_tensor = torch.ones(batch_size, 1, device=self.device, dtype=torch.long)
@@ -542,19 +617,22 @@ class HybridReplayBuffer:
                     data_source,                     # (batch_size, 1)
                 )
     
-    def _sample_rlpd(self, batch_size: int, expert_ratio: Optional[float] = None) -> Tuple[torch.Tensor, ...]:
+    def _sample_rlpd(
+        self, batch_size: int, expert_ratio: Optional[float] = None, num_batches: int = 1,
+    ) -> Tuple[torch.Tensor, ...]:
         """RLPD symmetric sampling: mix expert data with online data."""
         current_expert_ratio = expert_ratio if expert_ratio is not None else self.expert_ratio
         
         # Calculate split
         expert_batch_size = int(batch_size * current_expert_ratio)
-        online_batch_size = batch_size - expert_batch_size
+        online_batch_size = (batch_size - expert_batch_size) * num_batches
+        expert_batch_size *= num_batches
         
         # Handle edge case where expert_batch_size becomes 0
         if expert_batch_size == 0:
             # No expert data needed, sample only online data
             if self.size > 0:
-                return self._sample_standard(batch_size)
+                return self._sample_standard(batch_size * num_batches)
             else:
                 raise ValueError("Cannot sample: no online data available and expert_batch_size=0")
         
@@ -566,7 +644,10 @@ class HybridReplayBuffer:
             online_transitions = self._sample_standard(online_batch_size)
             # Concatenate expert and online data
             combined_transitions = tuple(
-                torch.cat([expert_batch, online_batch], dim=0)
+                torch.cat([
+                    expert_batch.reshape(num_batches, -1, *expert_batch.shape[1:]),
+                    online_batch.reshape(num_batches, -1, *online_batch.shape[1:]),
+                ], dim=1).flatten(0, 1)
                 for expert_batch, online_batch in zip(expert_transitions, online_transitions)
             )
         else:
@@ -589,10 +670,11 @@ class HybridReplayBuffer:
             - actions: (batch_size, horizon_steps, action_dim) - trajectories
         """
         # Return in same format as pretraining dataset __getitem__
-        return (
+        indices = indices.to(self.device)
+        return self._transfer_batch((
             self.chunk_states[indices],   # conditions: (batch_size, cond_steps, obs_dim)
             self.chunk_actions[indices],  # trajectories: (batch_size, horizon_steps, action_dim)
-        )
+        ))
     
     def _sample_expert_data(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
         """Sample from expert dataset and convert to same format as replay buffer."""
@@ -606,19 +688,19 @@ class HybridReplayBuffer:
         expert_batch = [self.expert_dataset[idx] for idx in expert_indices]
         
         # Convert to tensors and proper format
-        states = torch.stack([torch.tensor(transition.conditions['state'], dtype=torch.float32, device=self.device) 
+        states = torch.stack([torch.as_tensor(transition.conditions['state'], dtype=torch.float32, device=self.device).detach()
                              for transition in expert_batch])
-        actions = torch.stack([torch.tensor(transition.actions, dtype=torch.float32, device=self.device) 
+        actions = torch.stack([torch.as_tensor(transition.actions, dtype=torch.float32, device=self.device).detach()
                               for transition in expert_batch]) 
-        next_states = torch.stack([torch.tensor(transition.conditions['next_state'], dtype=torch.float32, device=self.device) 
+        next_states = torch.stack([torch.as_tensor(transition.conditions['next_state'], dtype=torch.float32, device=self.device).detach()
                                   for transition in expert_batch])
-        rewards = torch.stack([torch.tensor(transition.rewards, dtype=torch.float32, device=self.device) 
+        rewards = torch.stack([torch.as_tensor(transition.rewards, dtype=torch.float32, device=self.device).detach()
                               for transition in expert_batch])
-        dones = torch.stack([torch.tensor(transition.dones, dtype=torch.bool, device=self.device) 
+        dones = torch.stack([torch.as_tensor(transition.dones, dtype=torch.bool, device=self.device).detach()
                             for transition in expert_batch])
         
         # Generate random noise for expert transitions (needed for consistency)
-        noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.device)
+        noises = torch.randn(batch_size, self.horizon_steps, self.noise_action_dim, device=self.sample_device)
         
         # Expert data uses its configured n_step value (can differ from online data)
         # The expert dataset handles n-step computation in its __getitem__ method
@@ -630,7 +712,7 @@ class HybridReplayBuffer:
         
         if self.log_q_overestimation:
             # Get MC returns for expert data
-            mc_returns = torch.stack([torch.tensor(transition.mc_return, dtype=torch.float32, device=self.device) 
+            mc_returns = torch.stack([torch.as_tensor(transition.mc_return, dtype=torch.float32, device=self.device).detach()
                                      for transition in expert_batch])
             return states, noises, actions, rewards, next_states, dones, mc_returns, n_steps_tensor, data_source
         else:

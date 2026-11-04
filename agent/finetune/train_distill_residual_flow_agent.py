@@ -170,7 +170,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         # Initialize expert dataset for RLPD if enabled
         expert_dataset = None
         if cfg.get("use_rlpd", False) and hasattr(cfg, 'expert_dataset'):
-            expert_dataset = hydra.utils.instantiate(cfg.expert_dataset)
+            expert_dataset = hydra.utils.instantiate(
+                cfg.expert_dataset, device=cfg.replay_buffer.get("storage_device", "cpu")
+            )
             log.info(f"RLPD enabled: loaded expert dataset with {len(expert_dataset)} transitions")
 
         # Create replay buffer with shared arguments
@@ -183,6 +185,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             cond_steps=self.cond_steps,  # Number of observation history steps
             horizon_steps=self.horizon_steps,  # Number of action horizon steps
             device=self.device,
+            storage_device=cfg.replay_buffer.get("storage_device", "cpu"),
+            pin_memory=cfg.replay_buffer.get("pin_memory", True),
             gamma=cfg.train.get("gamma", 0.99),  # Discount factor for MC return computation
             log_q_overestimation=cfg.get("log_q_overestimation", False),  # Whether to compute MC returns
             # RLPD settings
@@ -278,30 +282,29 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             full_trajectory_info=full_trajectory_info  # List of trajectory dicts from MultiStepFull
         )
     
-    def update_networks(self, training_step: int = 0):
+    def update_networks(self, training_step: int = 0, batch=None):
         """
         Update all networks using data from replay buffer.
         
         Args:
             training_step: Current training step for Q-filtering warm-up
+            batch: Optional batch already sampled and transferred to the model device
         """
-        if self.replay_buffer.get_total_transitions() < self.batch_size:
+        if batch is None and self.replay_buffer.get_total_transitions() < self.batch_size:
             return
         
         # Get current expert ratio based on total steps (for adaptive scheduling)
         current_expert_ratio = self.get_current_expert_ratio(training_step)
         
-        # Sample batch from replay buffer with current expert ratio
+        if batch is None:
+            batch = self.replay_buffer.sample(
+                self.batch_size, 
+                expert_ratio=current_expert_ratio
+            )
         if self.log_q_overestimation:
-            state, noise, action, reward, next_state, done, mc_return, n_steps, data_source = self.replay_buffer.sample(
-                self.batch_size, 
-                expert_ratio=current_expert_ratio
-            )
+            state, noise, action, reward, next_state, done, mc_return, n_steps, data_source = batch
         else:
-            state, noise, action, reward, next_state, done, n_steps, data_source = self.replay_buffer.sample(
-                self.batch_size, 
-                expert_ratio=current_expert_ratio
-            )
+            state, noise, action, reward, next_state, done, n_steps, data_source = batch
         
         # Q-value overestimation analysis (compute before loss for Q-filtering)
         q_overestimation = None
@@ -997,8 +1000,15 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 # Accumulate metrics to log once at the end
                 accumulated_wandb_dict = {}
                 
-                for _ in range(self.gradient_steps):
-                    loss_dict, current_expert_ratio = self.update_networks(training_step=total_steps)
+                batches = self.replay_buffer.sample_batches(
+                    self.batch_size,
+                    self.gradient_steps,
+                    expert_ratio=self.get_current_expert_ratio(total_steps),
+                )
+                for _, batch in enumerate(batches):
+                    loss_dict, current_expert_ratio = self.update_networks(
+                        training_step=total_steps, batch=batch
+                    )
                     if loss_dict is not None:
                         # Accumulate training metrics (only from last gradient step)
                         if _ == self.gradient_steps - 1 and total_steps % self.log_freq == 0:
