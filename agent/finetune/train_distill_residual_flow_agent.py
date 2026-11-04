@@ -1006,6 +1006,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                                 wandb_dict = {
                                     'train/actor_loss': loss_dict['actor_total'].item(),
                                     'train/actor_bc_loss': loss_dict['actor_bc_loss'].item(),
+                                    'train/residual_norm': loss_dict['residual_norm'].item(),
                                     'train/actor_q_loss': loss_dict['actor_q_loss'].item(),
                                     'train/critic_loss': loss_dict['critic_loss'].item(), 
                                     # Q-filtering metrics
