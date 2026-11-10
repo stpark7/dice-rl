@@ -92,63 +92,72 @@ class TrainFlowMatchingImgAgent(TrainFlowMatchingAgent):
             # env rollout with image observations
             if self.epoch % self.val_freq == 0:
                 log.info(f"Starting env rollout at epoch {self.epoch} (val_freq={self.val_freq})")
-                # Reset environments for rollout
-                options_venv = [{} for _ in range(self.n_envs)]
-                for env_ind in range(self.n_render):
-                    options_venv[env_ind]["video_path"] = os.path.join(
-                        self.render_dir, f"epoch-{self.epoch}_trial-{env_ind}.mp4"
-                    )
-                prev_obs_venv = self.reset_env_all(options_venv=options_venv)
-                done_venv = np.zeros(self.n_envs, dtype=bool)
-                
-                policy = self.model
-                policy.eval()
-                reward_trajs = []
-                step_count = 0
-                max_steps = self.max_episode_steps
-                max_chunks = (max_steps + self.act_steps - 1) // self.act_steps
-                while not np.all(done_venv) and step_count < max_chunks:
-                    step_count += 1
-                    with torch.no_grad():
-                        cond = {}
-                        for key in self.obs_dims:
-                            obs_data = torch.from_numpy(prev_obs_venv[key]).float().to(self.device)
-                            # Handle RGB format conversion from (H, W, C) to (C, H, W)
-                            # Environment provides (N, T, H, W, C) but model expects (N, T, C, H, W)
-                            if key == "rgb" and len(obs_data.shape) == 5:
-                                obs_data = obs_data.permute(0, 1, 4, 2, 3)  # (N, T, H, W, C) -> (N, T, C, H, W)                            
-                            cond[key] = obs_data
-
-                        samples = policy(
-                            cond=cond
+                n_eval_episodes = int(self.cfg.train.get("n_eval_episodes", self.n_envs))
+                if n_eval_episodes <= 0:
+                    raise ValueError("train.n_eval_episodes must be positive")
+                successes = 0
+                completed = 0
+                while completed < n_eval_episodes:
+                    # Reset environments for rollout
+                    options_venv = [{} for _ in range(self.n_envs)]
+                    for env_ind in range(min(self.n_render, n_eval_episodes - completed)):
+                        options_venv[env_ind]["video_path"] = os.path.join(
+                            self.render_dir, f"epoch-{self.epoch}_trial-{completed + env_ind}.mp4"
                         )
-                        output_venv = (
-                            samples.trajectories.cpu().numpy()
-                        )  # n_env x horizon x act
-                    remaining_steps = max_steps - (step_count - 1) * self.act_steps
-                    action_venv = output_venv[:, : min(self.act_steps, remaining_steps)]
-                    
-                    # Apply multi-step action
-                    obs_venv, reward_venv, terminated_venv, truncated_venv, info_venv = (
-                        self.venv.step(action_venv)
+                    prev_obs_venv = self.reset_env_all(options_venv=options_venv)
+                    done_venv = np.zeros(self.n_envs, dtype=bool)
+
+                    policy = self.model
+                    policy.eval()
+                    reward_trajs = []
+                    step_count = 0
+                    max_steps = self.max_episode_steps
+                    max_chunks = (max_steps + self.act_steps - 1) // self.act_steps
+                    while not np.all(done_venv) and step_count < max_chunks:
+                        step_count += 1
+                        with torch.no_grad():
+                            cond = {}
+                            for key in self.obs_dims:
+                                obs_data = torch.from_numpy(prev_obs_venv[key]).float().to(self.device)
+                                # Handle RGB format conversion from (H, W, C) to (C, H, W)
+                                # Environment provides (N, T, H, W, C) but model expects (N, T, C, H, W)
+                                if key == "rgb" and len(obs_data.shape) == 5:
+                                    obs_data = obs_data.permute(0, 1, 4, 2, 3)  # (N, T, H, W, C) -> (N, T, C, H, W)
+                                cond[key] = obs_data
+
+                            samples = policy(
+                                cond=cond
+                            )
+                            output_venv = (
+                                samples.trajectories.cpu().numpy()
+                            )  # n_env x horizon x act
+                        remaining_steps = max_steps - (step_count - 1) * self.act_steps
+                        action_venv = output_venv[:, : min(self.act_steps, remaining_steps)]
+
+                        # Apply multi-step action
+                        obs_venv, reward_venv, terminated_venv, truncated_venv, info_venv = (
+                            self.venv.step(action_venv)
+                        )
+
+                        # Auto-reset workers may start another episode while others finish.
+                        reward_trajs.append(np.where(done_venv, 0, reward_venv))
+                        done_venv |= terminated_venv | truncated_venv
+                        prev_obs_venv = obs_venv
+
+                    if self.cfg.env.get("env_type") == "dexjoco" and self.n_render > 0:
+                        self.venv.call("stop_video")
+
+                    if step_count >= max_chunks and not np.all(done_venv):
+                        log.warning(f"Evaluation rollout hit max steps limit at epoch {self.epoch}. Done envs: {np.sum(done_venv)}/{self.n_envs}")
+
+                    reward_trajs = np.stack(reward_trajs, axis=-1)
+                    reward_trajs = np.max(reward_trajs, axis=1)  # n_env x horizon
+                    batch_size = min(self.n_envs, n_eval_episodes - completed)
+                    successes += np.count_nonzero(
+                        reward_trajs[:batch_size] >= self.best_reward_threshold_for_success
                     )
-
-                    # Auto-reset workers may start another episode while others finish.
-                    reward_trajs.append(np.where(done_venv, 0, reward_venv))
-                    done_venv |= terminated_venv | truncated_venv
-                    prev_obs_venv = obs_venv
-                
-                if self.cfg.env.get("env_type") == "dexjoco" and self.n_render > 0:
-                    self.venv.call("stop_video")
-
-                if step_count >= max_chunks and not np.all(done_venv):
-                    log.warning(f"Evaluation rollout hit max steps limit at epoch {self.epoch}. Done envs: {np.sum(done_venv)}/{self.n_envs}")
-                
-                reward_trajs = np.stack(reward_trajs, axis=-1)
-                reward_trajs = np.max(reward_trajs, axis=1)  # n_env x horizon
-                success_rate = np.sum(
-                    reward_trajs >= self.best_reward_threshold_for_success
-                ) / self.n_envs
+                    completed += batch_size
+                success_rate = successes / n_eval_episodes
                 log.info(
                     f"eval: success rate {success_rate:8.4f} "
                 )
