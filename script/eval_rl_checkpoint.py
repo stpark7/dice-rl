@@ -320,6 +320,8 @@ def main():
     
     # Extract directory path from checkpoint path and load config from .hydra/config.yaml
     ckpt_dir = os.path.dirname(args.ckpt_path)
+    if os.path.basename(ckpt_dir) == "checkpoint":
+        ckpt_dir = os.path.dirname(ckpt_dir)
     hydra_config_path = os.path.join(ckpt_dir, ".hydra", "config.yaml")
     
     if not os.path.exists(hydra_config_path):

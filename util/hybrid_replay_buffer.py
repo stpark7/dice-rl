@@ -687,7 +687,7 @@ class HybridReplayBuffer:
         # Get expert transitions
         expert_batch = [self.expert_dataset[idx] for idx in expert_indices]
         
-        # Convert to tensors and proper format
+        # Stack owns the batch storage; detach keeps expert data out of autograd.
         states = torch.stack([torch.as_tensor(transition.conditions['state'], dtype=torch.float32, device=self.device).detach()
                              for transition in expert_batch])
         actions = torch.stack([torch.as_tensor(transition.actions, dtype=torch.float32, device=self.device).detach()

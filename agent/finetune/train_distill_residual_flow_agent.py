@@ -1072,7 +1072,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         """Save the model and training state."""
         if step is None:
             step = 0
-        save_path = os.path.join(self.logdir, f"model_step_{step}.pth")
+        save_path = os.path.join(self.checkpoint_dir, f"model_step_{step}.pth")
         
         save_dict = {
             'model_state_dict': self.model.state_dict(),
@@ -1092,7 +1092,10 @@ class TrainDistillResidualFlowAgent(TrainAgent):
     
     def load(self, step):
         """Load the model and training state."""
-        load_path = os.path.join(self.logdir, f"model_step_{step}.pth")
+        load_path = os.path.join(self.checkpoint_dir, f"model_step_{step}.pth")
+        if not os.path.exists(load_path):
+            # Support checkpoints saved directly in the run directory by older runs.
+            load_path = os.path.join(self.logdir, f"model_step_{step}.pth")
         
         if not os.path.exists(load_path):
             log.warning(f"Model file {load_path} not found")

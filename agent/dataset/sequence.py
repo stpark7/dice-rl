@@ -25,6 +25,40 @@ TransitionWithReturn = namedtuple(
 )
 
 
+def _load_image_prefix(dataset, key, num_steps):
+    """Read selected C-order NPZ frames without decompressing all episodes.
+
+    ``dataset[key][:num_steps]`` first allocates the entire NPZ member, even
+    when only a few episodes are needed. Read its NPY header and stream only
+    the selected prefix into an owned array instead.
+    """
+    if not isinstance(dataset, np.lib.npyio.NpzFile):
+        return dataset[key][:num_steps]
+
+    with dataset.zip.open(f"{key}.npy") as member:
+        version = np.lib.format.read_magic(member)
+        if version == (1, 0):
+            shape, fortran_order, dtype = np.lib.format.read_array_header_1_0(member)
+        elif version == (2, 0):
+            shape, fortran_order, dtype = np.lib.format.read_array_header_2_0(member)
+        else:
+            return dataset[key][:num_steps].copy()
+        if fortran_order or dtype.hasobject:
+            return dataset[key][:num_steps].copy()
+
+        images = np.empty((min(int(num_steps), shape[0]), *shape[1:]), dtype=dtype)
+        if images.size:
+            target = memoryview(images).cast("B")
+            offset = 0
+            while offset < len(target):
+                # Bound temporary decompression buffers as well as the result.
+                count = member.readinto(target[offset : offset + 1024 * 1024])
+                if not count:
+                    raise ValueError(f"Truncated image array: {key}")
+                offset += count
+        return images
+
+
 def _load_cameras(dataset, image_keys, num_steps):
     """Concatenate the requested cameras' RGB channels in ``image_keys`` order.
 
@@ -39,7 +73,7 @@ def _load_cameras(dataset, image_keys, num_steps):
     missing = [name for name in keys if f"images_{name}" not in dataset]
     if missing:
         raise ValueError(f"No images_{missing[0]} array; reconvert the dataset with process_dexjoco_dataset.py")
-    frames = [dataset[f"images_{name}"][:num_steps] for name in keys]
+    frames = [_load_image_prefix(dataset, f"images_{name}", num_steps) for name in keys]
     return torch.from_numpy(np.concatenate(frames, axis=1))
 
 
@@ -139,7 +173,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             else:
                 if image_keys is not None:
                     raise ValueError("image_keys requires per-camera images_<name> arrays")
-                self.images = torch.from_numpy(dataset["images"][:total_num_steps]).to(device)
+                self.images = torch.from_numpy(
+                    _load_image_prefix(dataset, "images", total_num_steps)
+                ).to(device)
             log.info(f"Images shape/type: {self.images.shape, self.images.dtype}")
         if isinstance(dataset, np.lib.npyio.NpzFile):
             dataset.close()
