@@ -2,10 +2,10 @@
 Distilled residual RL model for image-based online finetuning through a frozen hand chord.
 
 This module extends DistillResidualRLModel so that the residual is added in the packed
-coordinates of a pretrained ChunkHandActionChord instead of the raw action space.
+coordinates of a pretrained hand chord instead of the raw action space.
 The state already contains visual features merged by the agent, with proprioception first.
 
-- HandChordResidualActor: residual actor that outputs packed [B, H*arm_dim+K] coordinates
+- HandChordResidualActor: residual actor that outputs packed [B, chord.policy_dim] coordinates
 - HandChordResidualRLImgModel: main model; critics, replay, exploration noise, and
   executed actions keep the raw [B, H, action_dim] interface of the parent
 
@@ -19,7 +19,7 @@ import logging
 log = logging.getLogger(__name__)
 
 from model.common.mlp import MLP
-from model.hand_chord.chunk_hand_chord import ChunkHandActionChord
+from model.hand_chord.codec import load_hand_chord
 from model.rl.distill_residual_rl import DistillResidualRLModel
 
 
@@ -87,7 +87,7 @@ class HandChordResidualRLImgModel(DistillResidualRLModel):
 
     The main differences from DistillResidualRLImgModel:
     1. get_action adds the residual to the chord-encoded pretrained action and decodes the sum
-    2. the actor is a HandChordResidualActor that outputs [B, H*arm_dim+K]
+    2. the actor is a HandChordResidualActor that outputs [B, chord.policy_dim]
     3. the chord is loaded from chord_path and kept frozen in eval mode with the pretrained policy
     """
 
@@ -115,17 +115,17 @@ class HandChordResidualRLImgModel(DistillResidualRLModel):
             obs_dim: Augmented observation dimension; the first chord.state_dim entries are proprioception
             action_dim: Raw action dimension, must match the chord
             pretrained_flow_policy_path: Path to pretrained flow policy
-            chord_path: Path to a pretrained ChunkHandActionChord checkpoint (chord.pt)
+            chord_path: Path to a pretrained hand chord checkpoint (chord.pt)
             actor_hidden_dims, activation_type, use_layernorm: Same meaning as in parent class
             **kwargs: All other parameters passed to parent class
         """
 
         # Keep modules local until the parent initializes nn.Module.
-        chord = ChunkHandActionChord.load(chord_path, device=device)
+        chord = load_hand_chord(chord_path, device=device)
         chord.requires_grad_(False)
 
         if condition_residual_on_base_action: # condition on the packed base action, which is (B, chord_dim)
-            input_action_dim = chord.policy_dim #  chord_dim = horizon_steps × arm_dim + latent_dim
+            input_action_dim = chord.policy_dim #  chord_dim is read from the codec metadata
         else: # condition on noise, which is (B, horizon_steps, action_dim)
             input_action_dim = horizon_steps * action_dim
 

@@ -1,4 +1,4 @@
-"""Hydra-managed offline training of a global chunk hand-action chord."""
+"""Hydra-managed offline training of global and temporal hand-action chords."""
 
 import hashlib
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 import random
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import numpy as np
 from omegaconf import OmegaConf
 import torch
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from agent.dataset.hand_chunks import load_data
 from model.hand_chord.chunk_hand_chord import ChunkHandActionChord
+from model.hand_chord.codec import load_hand_chord
 from util.hand_chord_training import evaluate, fit_statistics, kl_weight
 
 
@@ -82,7 +84,10 @@ class TrainChunkHandChordAgent:
         self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.n_steps)
 
         # Save the resolved configuration and initialize checkpoint-selection state.
-        self.output_dir = Path(cfg.logdir)
+        self.output_dir = Path(
+            HydraConfig.get().runtime.output_dir if HydraConfig.initialized() else cfg.logdir
+        )
+        cfg.logdir = str(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         OmegaConf.save(cfg, self.output_dir / "config.yaml", resolve=True)
         self.step = 0
@@ -188,7 +193,7 @@ class TrainChunkHandChordAgent:
         checkpoint_path = self.output_dir / "chord.pt"
 
         # Reload the best weights and fit latent statistics on training chunks.
-        self.model = ChunkHandActionChord.load(best_checkpoint_path, device=str(self.device))
+        self.model = load_hand_chord(best_checkpoint_path, device=str(self.device))
         latent_mean, latent_std = fit_statistics(
             self.model, self.dataset_train, self.batch_size, self.device, latent=True,
         )
@@ -209,7 +214,13 @@ class TrainChunkHandChordAgent:
 
         summary = dict(
             steps=self.n_steps,
+            codec=("temporal_chunk" if self.model.metadata()["latent_layout"] == "B,H,K"
+                   else "global_chunk"),
             latent_dim=self.model.latent_dim,
+            policy_dim=self.model.policy_dim,
+            split_seed=int(self.cfg.train_dataset.get("split_seed", self.seed)),
+            train_episode_ids=self.dataset_train.episode_ids.tolist(),
+            validation_episode_ids=self.dataset_val.episode_ids.tolist(),
             best_step=self.best_step,
             validation={"mae_deg": self.best_mae},
             checkpoint=str(checkpoint_path.resolve()),

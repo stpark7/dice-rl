@@ -3,9 +3,17 @@ defaults:
 hydra:
   run:
     dir: ${logdir}
+  sweep:
+    dir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-handchord/pretrain/multirun/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    subdir: ${hydra.job.num}_${name}_seed${seed}
 _target_: agent.hand_chord.train_chunk_hand_chord_agent.TrainChunkHandChordAgent
 
-name: ${env_name}_pre_chunk_hand_chord_h${horizon_steps}_k${latent_dim}
+codec: global_chunk
+codec_targets:
+  global_chunk: model.hand_chord.chunk_hand_chord.ChunkHandActionChord
+  temporal_chunk: model.hand_chord.temporal_hand_chord.TemporalHandActionChord
+
+name: ${env_name}_pre_${codec}_hand_chord_h${horizon_steps}_k${latent_dim}
 logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-handchord/pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 train_dataset_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/train.npz
 normalization_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
@@ -31,7 +39,7 @@ train:
   kl_ramp_steps: 4000
 
 model:
-  _target_: model.hand_chord.chunk_hand_chord.ChunkHandActionChord
+  _target_: ${codec_targets.${codec}}
   raw_action_dim: 22
   hand_dim: 16
   state_dim: 23
@@ -50,4 +58,4 @@ train_dataset:
   dataset_path: ${train_dataset_path}
   max_n_episodes: 50
   val_fraction: 0.1
-  split_seed: ${seed}
+  split_seed: 0
