@@ -16,12 +16,17 @@
 ## 1. 사용자가 확정한 비교군과 실행 범위
 
 - 작업: `fold_glasses`, `pick_bucket`.
-- 기존 압축 방식: `global_chunk`, K=8, `ChunkHandActionChord`.
+- 기존 압축 방식: `global_chunk`, K=8, `ChunkHandActionChord`. **이미 완료된
+  실험 결과만 사용해줘. Global K8 codec 사전학습·RL 학습·재평가는 새로 실행하지 마.**
 - 새 압축 방식: `temporal_chunk`, K=9, `TemporalHandActionChord`.
-- paired seed: **42, 142, 242, 342**. 두 방식에 동일한 네 seed를 적용해줘.
-- 주 실험은 2개 작업 × 2개 방식 × 4개 seed = **16개 RL 실행**이야.
-- 각 작업·방식·seed의 codec도 아래 공통 조건으로 준비해줘. codec seed와 RL
+- seed: **42, 142, 242, 342**. Temporal K9를 이 네 seed로 새로 실행하고,
+  기존 Global K8 결과를 작업·seed별로 대응시켜줘.
+- 신규 학습은 2개 작업 × Temporal K9 × 4개 seed = **8개 RL 실행**이야.
+- 각 작업·seed의 Temporal codec도 아래 조건으로 준비해줘. codec seed와 RL
   seed는 대응시키고, seed가 달라도 데이터 episode split은 항상 0으로 고정해줘.
+- 기존 Global 결과의 run ID, seed, resolved config와 평가 기록을 먼저 확보해줘.
+  일부 결과가 없거나 조건이 다르면 누락·차이를 명시하고 필요한 출처를 확인해줘.
+  이를 해결하려고 Global 실험을 자동으로 다시 돌리지 말아줘.
 - 사용자 승인 없이 K8↔K8, K128 control, 추가 seed 등 다른 비교군으로 바꾸거나
   실험 수를 늘리지 말아줘.
 
@@ -44,10 +49,12 @@ API로 확인한 네 기존 실행은 seed와 run/output 이름 외 학습 설�
 이미 추가된 각 작업의
 `cfg/dexjoco/finetune/<task>/ft_temporal_hand_chord_residual_flow_unet_img.yaml`과
 `tests/test_temporal_hand_chord_rl_config.py`의 reference snapshot을 기준으로
-비교용 설정을 만들어줘. 기존 YAML 전체를 복제하기보다는 같은 부모 설정을
-공유하고 codec/checkpoint/seed/실험명만 전환할 수 있도록 구성해줘.
+Temporal 실행 설정을 만들어줘. 기존 YAML 전체를 복제하기보다는 같은 부모 설정을
+공유하고 checkpoint/seed/실험명만 전환할 수 있도록 구성해줘.
+기존 Global 결과의 실제 설정과 reference를 대조하고, 중요한 차이가 있으면
+본 학습 전에 차이를 보고해줘. Global 재학습으로 차이를 없애려 하지 말아줘.
 
-다음 값은 두 방식, 두 작업 모두 그대로 유지해줘:
+새 Temporal 실행은 다음 기준값을 유지해줘:
 
 | 항목 | 기준값 |
 | --- | --- |
@@ -72,7 +79,8 @@ API로 확인한 네 기존 실행은 seed와 run/output 이름 외 학습 설�
 LR scheduler, Q filtering/normalization, expert sampling, 탐색 전략,
 `success_steps_before_termination=1`, image keys `[front,wrist]` 등 표에 없는
 공통 설정도 reference snapshot과 동일하게 유지해줘. 이름과 저장 경로, 로깅
-프로젝트는 실행별로 구분해도 돼. 로깅 방식은 모든 비교군에서 동일하게 해줘.
+프로젝트는 실행별로 구분해도 돼. 새 실행의 로깅 방식은 통일하고 기존 Global
+결과는 원래 기록을 보존해줘.
 
 메모리 때문에 batch, gradient steps, 후보 수, hidden dims, replay 크기,
 학습/평가 episode 수 등을 줄이지 말아줘. 메모리가 부족하면 다른 작업이
@@ -99,18 +107,15 @@ LR scheduler, Q filtering/normalization, expert sampling, 탐색 전략,
 
 서버의 `DICE_RL_DATA_DIR`와 `DICE_RL_LOG_DIR`만 실제 위치에 맞춰줘.
 
-## 4. Codec 사전학습도 공통 조건으로 맞춰줘
+## 4. Temporal codec 준비
 
 각 task/seed에 기존 pretrain config의 selector를 사용해줘:
 
 ```bash
-# Global arm
-codec=global_chunk latent_dim=8 seed=<해당 seed>
-# Temporal arm
-codec=temporal_chunk latent_dim=9 seed=<동일 seed>
+codec=temporal_chunk latent_dim=9 seed=<해당 seed>
 ```
 
-공통 조건:
+Temporal codec 학습 조건:
 
 - `train.n_steps=20000`, `train.batch_size=128`.
 - horizon16, width128, transformer layers3, heads4, dropout0.
@@ -129,9 +134,10 @@ codec=temporal_chunk latent_dim=9 seed=<동일 seed>
 step 학습됐어. `checkpoints/temporal-hand-chord/k9_seed42/`의 checksum·metadata를
 확인하고 일치하면 seed42 Temporal arm에서 재사용해도 돼. 두 export의 MAE는
 PickBucket1.052837°, FoldGlasses0.919131°야. 다른 seed의 codec을 이 두 파일로
-대체하거나 seed42라고 이름만 바꾸지 말아줘. 기존 Global checkpoint의 학습
-조건이 불명확하면 같은 조건으로 Global K8을 다시 학습해서 공정하게 비교해줘.
-과거 W&B 성능은 참고치이며, 이번 paired 비교의 누락된 실행을 대신하지 않아.
+대체하거나 seed42라고 이름만 바꾸지 말아줘. 재사용 조건이 맞으면 새 codec
+학습은 나머지3 seed × 2개 작업 = 6개만 필요해.
+Global codec의 학습 조건은 기존 metadata에서 확인하고, 불명확한 내용은 그대로
+기록해줘. 기존 Global 결과가 이번 비교의 baseline이며 재학습 대상이 아니야.
 
 ## 5. 실행 전 검증과 실제 실행
 
@@ -139,42 +145,51 @@ PickBucket1.052837°, FoldGlasses0.919131°야. 다른 seed의 codec을 이 두 
 2. `python -m unittest discover -s tests -v`를 실행하고 새 설정/큐에 필요한
    집중 검증도 해줘. 두 codec은 같은 raw action/critic/replay 인터페이스를
    사용해야 하고, 팔 값 보존·frozen decoder 경유 actor gradient를 유지해야 해.
-3. 16개 실행의 resolved config를 비교하여 허용된 차이(codec/K/checkpoint,
+3. 새 Temporal 8개 실행과 기존 Global 결과의 resolved config를 비교하여
+   허용된 차이(codec/K/checkpoint,
    그에 따른 actor 차원, seed, 식별/출력 경로) 외의 설정 차이를 검사해줘.
    같은 seed 쌍에서는 seed까지 동일해야 해. 작업별 차이는 위에서 명시한 것만 허용해.
 4. task/codec/K/seed/stage를 경로와 실행명에 포함하고, config·commit·코드 diff·
    데이터/모델 fingerprint·환경 버전·GPU·시작/종료 시각·종료 코드를 기록해줘.
    이전 run을 덮어쓰지 말고, 실패한 run의 오래된 summary를 새 성공으로 취급하지 말아줘.
 5. `script/train_temporal_hand_chord_rl.sh`는 Temporal K9 seed42의 두 작업을
-   순차 실행하는 출발점이야. 전체 matrix를 실행하려면 이를 적절히 확장하거나
-   별도 launcher를 만들어줘. 현재 스크립트만 실행하고16개를 완료했다고 말하지 말아줘.
+   순차 실행하는 출발점이야. 네 seed의8개 신규 실행을 위해 이를 적절히 확장하거나
+   별도 launcher를 만들어줘. 현재 스크립트만 실행하고8개를 완료했다고 말하지 말아줘.
+   실행 큐에는 Global K8 작업을 넣지 말아줘.
 6. tmux 또는 작업 스케줄러로 세션 종료 후에도 유지되는 실행 큐를 실제로 시작해줘.
    실패는 원인을 조사하고, 파라미터를 몰래 줄여 통과시키지 말아줘.
-   코드 오류를 고쳤으면 같은 수정본으로 모든 비교군을 검증해줘.
+   코드 오류를 고쳤으면 모든 새 Temporal 실행에 동일한 수정본을 적용하고,
+   기존 Global 실행 코드와의 차이도 기록해줘. Global 재실행은 하지 말아줘.
 7. 실제 optimizer update와 주기적 checkpoint가 생기는지 확인하고, 진행표를
    파일에 유지해서 다른 에이전트가 중복 실행 없이 이어받을 수 있게 해줘.
 
 ## 6. 평가와 최종 산출물
 
-- Raw BC, codec projection `D(E(base))`(residual=0), 학습된 RL을 따로 측정해줘.
+- 새 Temporal 실행은 Raw BC, codec projection `D(E(base))`(residual=0),
+  학습된 RL을 따로 측정해줘. Global은 저장된 평가 기록만 사용하고, 없는 지표는
+  미측정으로 남겨줘. Global 평가를 새로 실행하지 말아줘.
   랜덤 초기화 actor를 zero-residual baseline으로 취급하지 말아줘.
 - 현재 trainer는 `evaluation_results.csv`에 `pretrained`, `codec_projection`,
   `finetuned`를 구분하고 initial raw/projection의 환경 seed·flow noise를 맞춰.
-  현재 noise pairing은 한 run 안의 initial raw/projection에 적용돼. 두 codec
-  방식 사이의 평가 noise도 명시적인 공통 seed/generator로 맞추고, 평가 RNG를
-  fork/restore하여 추가 평가가 training RNG를 바꾸지 않도록 검증해줘.
+  현재 noise pairing은 한 run 안의 initial raw/projection에 적용돼. 새 Temporal
+  평가는 명시적인 seed/generator를 사용하고, 평가 RNG를 fork/restore하여
+  추가 평가가 training RNG를 바꾸지 않도록 검증해줘. 기존 Global의 noise 설정을
+  확인할 수 없다면 두 방식이 동일 noise로 평가됐다고 주장하지 말아줘.
 - 평가 환경 seed10000–10199를 사용하고, 주 평가 metric은 최종10,000 rollout
   checkpoint의200 episode success rate로 고정해줘. 중간 best를 선택한 결과는
   별도 보조 지표로만 표시해줘. 판정 기준과 checkpoint 선택 규칙을 결과 보고
-  나서 변경하지 말아줘.
+  나서 변경하지 말아줘. Global은 기존 기록에서 해당 step·평가 조건의 결과를
+  가져오고, 없으면 누락으로 표시해줘. 다른 step의 best를 대신 쓰지 말아줘.
 - 각 작업·방식·seed의 success rate, return, codec MAE, 학습량, runtime,
   checkpoint 경로를 남겨줘. 실제 episode 수와 성공 횟수도 같이 저장해줘.
 - 작업별로 두 방식의 네 seed 결과 원본, 평균±표본 표준편차(ddof=1), 같은 seed
   쌍의 성능 차이(Temporal−Global)를 표와 그래프로 정리해줘. 환경 episode를
-  독립 training seed처럼 합쳐서 seed 수를 부풀리지 말아줘.
+  독립 training seed처럼 합쳐서 seed 수를 부풀리지 말아줘. 기존 Global 결과가
+  부족하면 실제 확인된 seed 수만 보고하고, 대응하지 않는 seed를 paired로 취급하지 마.
 - 결과 CSV/JSON, 재현 명령, 설정 차이 보고서, 학습곡선, 실패/재실행 이력과
   간결한 Markdown 보고서를 저장해줘. 미완료 실행이 있으면 상태를 명확히 구분해줘.
-- 성공 기준은 16개 RL 실행과 각 최종 평가가 완료되고, 압축 후보 외 조건이
-  일치한다는 근거와 paired four-seed 비교 결과를 제공하는 것이야.
+- 성공 기준은 Temporal K9의8개 RL 실행과 각 최종 평가가 완료되고, 기존
+  Global K8 결과를 출처와 함께 재사용하여 four-seed 비교 결과를 제공하는 것이야.
+  조건 불일치나 baseline 누락은 명시하고 Global 실험을 추가로 실행하지 말아줘.
 
 ---

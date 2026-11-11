@@ -3,10 +3,11 @@
 Branch: `temporal-hand-chord-pick-bucket-fold-glasses` in `stpark7/dice-rl`.
 Local codec training is complete. Residual RL main training has **not** started.
 The user requested server execution without lowering parameters for memory.
-The final requested comparison is Global K8 versus Temporal K9 on both tasks,
-with seeds 42, 142, 242 and 342. Follow
+The final requested comparison reuses the existing Global K8 results and trains
+only Temporal K9 on both tasks, with seeds 42, 142, 242 and 342. Do not launch
+new Global K8 codec training, RL training, or evaluation. Follow
 [the next-agent experiment prompt](hand-chord-four-seed-agent-prompt.md) for that
-16-run comparison. The two-task launcher below is the Temporal K9 seed-42 entry
+comparison with eight new Temporal RL runs. The two-task launcher below is the Temporal K9 seed-42 entry
 point; it does not itself schedule the complete comparison matrix.
 
 ## Reference configuration
