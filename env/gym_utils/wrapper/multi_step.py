@@ -164,6 +164,10 @@ class MultiStep(gym.Wrapper):
             else:
                 truncated = info["TimeLimit.truncated"]
                 terminated = done
+            # An environment's false truncation flag must not disable the
+            # wrapper's own rollout budget (DexJoCo supplies it every step).
+            if not terminated and self.max_episode_steps is not None:
+                truncated = truncated or self.cnt >= self.max_episode_steps
             done = truncated or terminated
             self.done.append(done)
             self._add_info(info)

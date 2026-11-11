@@ -1,0 +1,139 @@
+# @package _global_
+hydra:
+  run:
+    dir: ${logdir}
+  job:
+    chdir: false
+
+_target_: agent.finetune.train_resfit_agent.TrainResFiTAgent
+name: ${env_name}_resfit_unet_img
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-resfit/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+mode: train
+checkpoint_path: null
+eval_base_policy: true
+run_eval: true
+
+pretrained_run_dir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-pretrain/pretrained_bc_policy_${env_name}_img
+base_policy_path: ${pretrained_run_dir}/checkpoint/state_2000.pt
+base_policy_config_path: null
+base_policy_weights: model
+normalization_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
+
+env_name: pick_bucket
+
+seed: 42
+device: cuda:0
+obs_dim: 23
+action_dim: 22
+horizon_steps: 16
+cond_steps: 1
+img_cond_steps: 1
+act_steps: 1
+bc_action_steps: 16
+
+env:
+  n_envs: 8
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 700
+  save_video: false
+  use_image_obs: true
+  env_type: dexjoco
+  wrappers:
+    dexjoco_image:
+      normalization_path: ${normalization_path}
+      success_steps_before_termination: 1
+      image_keys: [front, wrist]
+      low_dim_keys: [tcp_pose, gripper_pose]
+      shape_meta: ${shape_meta}
+      task_name: ${env_name}
+      policy_mode: true
+      randomize: false
+      render_mode: rgb_array
+      realtime: false
+      max_episode_steps: ${env.max_episode_steps}
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [96, 96, 6]
+    state:
+      shape: [23]
+  action:
+    shape: [22]
+
+wandb:
+  project: dexjoco-pick-bucket-resfit
+  entity: null
+
+model:
+  _target_: model.rl.resfit.ResFiTModel
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  pretrained_policy_path: ${base_policy_path}
+  pretrained_config_path: ${base_policy_config_path}
+  base_policy_weights: ${base_policy_weights}
+  critic_ensemble_size: 10
+  target_subset_size: 2
+  residual_scale: 0.2
+  exploration_std: 0.05
+  target_noise_clip: 0.3
+  actor_hidden_dims: [1024, 1024]
+  critic_hidden_dims: [1024, 1024]
+  device: ${device}
+
+train:
+  # Total individual simulator transitions, summed across vector workers.
+  num_train_steps: 1600000
+  batch_size: 256
+  # Critic updates per simulator transition; one actor update per UTD cycle.
+  utd_ratio: 4
+  buffer_warmup_steps: 10000
+  critic_warmup_steps: 10000
+  warmup_noise_scale: 0.2
+  actor_lr: 1e-6
+  critic_lr: 1e-4
+  gamma: 0.99
+  tau: 0.005
+  n_step: 3
+  eval_freq: 10000
+  save_freq: 10000
+  log_freq: 1000
+  max_grad_norm: 1.0
+  preprocess_batch_size: 64
+  render:
+    num: 0
+
+replay_buffer:
+  max_size: 200000
+
+expert_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceQLearningDataset
+  dataset_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_finetune/train.npz
+  # Expert transitions are per-step even though the BC predicts 16-step chunks.
+  horizon_steps: 1
+  cond_steps: ${cond_steps}
+  img_cond_steps: ${img_cond_steps}
+  device: cpu
+  image_keys: ${env.wrappers.dexjoco_image.image_keys}
+  discount_factor: ${train.gamma}
+  gamma: ${train.gamma}
+  max_n_episodes: 100
+  use_img: true
+  success_steps_for_termination: ${env.wrappers.dexjoco_image.success_steps_before_termination}
+  use_n_step: false
+  get_mc_return: false
+  use_6d_rot: false
+  abs_action: false
+
+# Exact total number of episodes, independent of eval_n_envs.
+num_eval_episodes: 100
+eval_n_envs: 8
+eval_seed: 10000
