@@ -443,7 +443,7 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             full_trajectory_info=full_trajectory_info,  # List of trajectory dicts from MultiStepFull
         )
     
-    def _get_flow_action_for_eval(self, obs):
+    def _get_flow_action_for_eval(self, obs, project_with_chord=False):
         """
         Override parent's method to handle image observations.
         Copy exact pretraining evaluation logic for perfect consistency.
@@ -480,7 +480,10 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             samples = self.model.pretrained_flow_policy(
                 cond=cond
             )
-            output_venv = samples.trajectories.cpu().numpy()  # n_env x horizon x act
+            actions = samples.trajectories
+            if project_with_chord:
+                actions = self._project_flow_action_for_eval(actions, state)
+            output_venv = actions.cpu().numpy()  # n_env x horizon x act
             action_venv = output_venv[:, :self.act_steps]
             
             return action_venv

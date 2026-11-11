@@ -9,6 +9,20 @@ experiment_root="${1:-$repo_root/log_dir/temporal-hand-chord/$(date +%Y-%m-%d_%H
 mkdir -p "$experiment_root"
 experiment_root="$(cd "$experiment_root" && pwd)"
 
+# Existing runs may predate the reservation marker. Never overwrite their files.
+for artifact in status launcher.pid pick_bucket fold_glasses; do
+    if [[ -e "$experiment_root/$artifact" || -L "$experiment_root/$artifact" ]]; then
+        printf 'Refusing to reuse experiment directory with existing artifact: %s\n' "$experiment_root/$artifact" >&2
+        exit 1
+    fi
+done
+# Atomic and permanent: only one launcher can own this output directory, even
+# after completion or cleanup. Orchestrator manifests and launcher logs may exist.
+if ! mkdir "$experiment_root/.launcher-reservation" 2>/dev/null; then
+    printf 'Refusing to reuse reserved experiment directory: %s\n' "$experiment_root" >&2
+    exit 1
+fi
+
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"

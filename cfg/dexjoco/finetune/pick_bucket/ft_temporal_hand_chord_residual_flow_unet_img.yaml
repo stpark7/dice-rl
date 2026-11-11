@@ -1,0 +1,36 @@
+# Reference: gist_ailab/dexjoco-pick_bucket_latent_residual_batch256, zbsqw25b.
+# Keep its seed-42 RL settings; use this task's BC model and Temporal K9 codec.
+defaults:
+  - ft_hand_chord_residual_flow_unet_img
+  - _self_
+
+name: ${env_name}_ft_temporal_k9_hand_chord_residual_flow_unet_img_ta${horizon_steps}_fl${flow_steps}
+chord_run_dir: checkpoints/temporal-hand-chord/k9_seed42
+seed: 42
+obs_dim: 23  # The image trainer appends 128 visual features, producing 151.
+wandb: null
+
+env:
+  n_envs: 10
+
+train:
+  num_train_steps: 10000
+  batch_size: 256
+  gradient_steps: 10
+  log_freq: 1
+  render:
+    freq: 0
+    num: 3
+
+replay_buffer:
+  max_size: 1000000
+  storage_device: cpu
+  pin_memory: true
+
+model:
+  chord_path: ${chord_run_dir}/${env_name}/chord.pt
+  q_filtering_warmup_steps: 1000
+
+# 50 rounds * 4 environments = 200 episodes, matching the reference run.
+num_eval_episodes: 50
+eval_n_envs: 4

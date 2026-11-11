@@ -589,7 +589,15 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         else:
             return mean_episode_reward, success_rate
     
-    def _get_flow_action_for_eval(self, obs):
+    def _project_flow_action_for_eval(self, action, state):
+        """Project a full base-policy chunk through its frozen measured-q0 codec."""
+        chord = getattr(self.model, "chord", None)
+        if chord is None:
+            raise ValueError("Codec projection evaluation requires model.chord")
+        proprioception = state[..., :chord.state_dim]
+        return chord.decode(chord.encode(action, proprioception), proprioception)
+
+    def _get_flow_action_for_eval(self, obs, project_with_chord=False):
         """
         Get action from pretrained flow policy for evaluation.
         This is separated out so child classes can override it.
@@ -608,15 +616,20 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 cond={"state": obs_tensor},
             )
             action = sample.trajectories
+            if project_with_chord:
+                action = self._project_flow_action_for_eval(action, obs_tensor)
             
             return action[:, :self.act_steps].cpu().numpy()
     
-    def evaluate_pretrained_flow_policy(self):
+    def evaluate_pretrained_flow_policy(self, project_with_chord=False):
         """
-        Evaluate the pretrained flow matching policy before finetuning.
+        Evaluate the raw base or its zero-residual codec projection before finetuning.
         Uses exact same seeds and episodes as regular evaluation.
         """
-        log.info("Evaluating pretrained flow matching policy...")
+        if project_with_chord and getattr(self.model, "chord", None) is None:
+            raise ValueError("Codec projection evaluation requires model.chord")
+        eval_type = "codec_projection" if project_with_chord else "pretrained"
+        log.info("Evaluating %s flow policy...", eval_type)
         self.model.eval()
         
         # Collect trajectories with same seeds as regular evaluation
@@ -658,7 +671,10 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                         env_trajectories[env_idx].append(eef_state)
                 
                 # Get actions using the separated method
-                action_chunk = self._get_flow_action_for_eval(obs)
+                if project_with_chord:
+                    action_chunk = self._get_flow_action_for_eval(obs, project_with_chord=True)
+                else:
+                    action_chunk = self._get_flow_action_for_eval(obs)
                 
                 # Step EVAL environments
                 obs, reward_venv, terminated_venv, truncated_venv, _ = self.eval_venv.step(action_chunk)
@@ -675,7 +691,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                         if done_venv[env_idx]:
                             episode_done[env_idx] = True
                 step_count += 1
-                print(f"Pretrained eval episode {episode}, step {step_count}", end='\r')
+                print(f"{eval_type} eval episode {episode}, step {step_count}", end='\r')
             # Store trajectories from all environments for this episode
             for env_idx, traj in enumerate(env_trajectories):
                 if len(traj) > 0:
@@ -701,7 +717,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         # log.info(f"Success rate comparison - Original method: {original_success_rate:.3f}, Pretraining method: {pretraining_style_success_rate:.3f}")
         success_rate = pretraining_style_success_rate
         
-        log.info(f"Pretrained flow policy: reward={mean_reward:.3f}, success_rate={success_rate:.3f} "
+        log.info(f"{eval_type} flow policy: reward={mean_reward:.3f}, success_rate={success_rate:.3f} "
                 f"({len(trajectories)} trajectories)")
         
         # Calculate std reward
@@ -710,7 +726,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         # Log pretrained evaluation results to CSV (step=0 since it's before training)
         self._log_eval_to_csv(
             step=0,
-            eval_type='pretrained',
+            eval_type=eval_type,
             mean_reward=mean_reward,
             std_reward=std_reward,
             success_rate=success_rate,
@@ -883,7 +899,23 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         
         # Evaluate pretrained flow policy before any training (if evaluation is enabled)
         if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv'):
+            has_chord = getattr(self.model, "chord", None) is not None
+            if has_chord:
+                baseline_cpu_rng = torch.get_rng_state()
+                eval_device = torch.device(self.device)
+                rng_devices = []
+                if eval_device.type == "cuda":
+                    rng_devices = [eval_device.index if eval_device.index is not None
+                                   else torch.cuda.current_device()]
+                baseline_cuda_rng = [torch.cuda.get_rng_state(device) for device in rng_devices]
             pretrained_trajectories, pretrained_reward, pretrained_success = self.evaluate_pretrained_flow_policy()
+            if has_chord:
+                # Match base-policy noise, then preserve the post-raw training RNG stream.
+                with torch.random.fork_rng(devices=rng_devices):
+                    torch.set_rng_state(baseline_cpu_rng)
+                    for device, state in zip(rng_devices, baseline_cuda_rng):
+                        torch.cuda.set_rng_state(state, device)
+                    self.evaluate_pretrained_flow_policy(project_with_chord=True)
         else:
             pretrained_trajectories, pretrained_reward, pretrained_success = [], 0.0, 0.0
             log.info("Skipping pretrained evaluation (run_eval=False or eval_venv not created)")
@@ -915,7 +947,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         
         while total_steps < self.num_train_steps:
             # Run evaluation and visualization (if evaluation is enabled)
-            # Skip step 0: the residual is untrained, so the pretrained eval above already covers it
+            # Evaluate trained residuals after the initial raw and codec-projection baselines.
             if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv') and total_steps > 0 and total_steps % self.eval_freq == 0:
                 # Evaluate and collect trajectories if visualization is enabled
                 if self.visualize_trajectories and total_steps % self.visualization_freq == 0:

@@ -1,0 +1,26 @@
+{
+  "codec": "temporal_chunk",
+  "latent_dim": 9,
+  "horizon_steps": 16,
+  "seed": 42,
+  "split_seed": 0,
+  "training_steps_per_task": 20000,
+  "batch_size": 128,
+  "code_commit": "e4ad7eba955bd4e87b0340ed61f5ff8ddccebe38",
+  "tasks": {
+    "pick_bucket": {
+      "best_step": 5000,
+      "validation_mae_deg": 1.0528372828828128,
+      "train_episodes": 88,
+      "validation_episodes": 10,
+      "normalization_sha256": "8496cd72d9e585042fe039c2fb71ca38660f24820f1ffc70250125d5a923e856"
+    },
+    "fold_glasses": {
+      "best_step": 19500,
+      "validation_mae_deg": 0.9191310827024216,
+      "train_episodes": 90,
+      "validation_episodes": 10,
+      "normalization_sha256": "b901be560ce2b8f1c24dd8ce050468026d742b781d86666a169010fa129d7b92"
+    }
+  }
+}

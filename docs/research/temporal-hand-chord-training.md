@@ -50,7 +50,7 @@ DICE_RL_PYTHON=/home/lee/anaconda3/envs/dice-rl/bin/python \
   "$PWD/log_dir/temporal-hand-chord/2026-11-11/k9_seed42"
 ```
 
-Use a fresh output directory for each new run. The current experiment is launched
+Use a fresh output directory for each new run. The completed experiment ran
 inside the persistent tmux session `temporal-chord-k9-20261111`. Per-task
 directories contain `train.log`, `command.sh`, `status`, `history.jsonl`,
 `config.yaml`, `.hydra/`, `best.pt`, `latest.pt`, `chord.pt`, and `summary.json`
@@ -61,16 +61,22 @@ latent statistics fitted on training episodes.
 cat log_dir/temporal-hand-chord/2026-11-11/k9_seed42/status
 tail -n 10 log_dir/temporal-hand-chord/2026-11-11/k9_seed42/pick_bucket/train.log
 tail -n 10 log_dir/temporal-hand-chord/2026-11-11/k9_seed42/fold_glasses/train.log
-tmux attach -t temporal-chord-k9-20261111
 ```
+
+Both 20,000-step runs completed. Exported best checkpoints: PickBucket step 5,000,
+held-out MAE 1.052837 degrees; FoldGlasses step 19,500, held-out MAE 0.919131 degrees.
+The two self-contained codecs and metadata are committed under
+`checkpoints/temporal-hand-chord/k9_seed42/` at the user's request.
+See [server handoff](temporal-hand-chord-server-handoff.md) to start residual RL.
 
 ## Validation
 
 `OMP_NUM_THREADS=1 /home/lee/anaconda3/envs/dice-rl/bin/python -m unittest discover -s tests -v`
-passed all 29 tests with CUDA available. This includes exact arm preservation,
+passed all 48 tests with CUDA available, including bundled-codec integrity and default-path checks. This includes exact arm preservation,
 temporal q0 conditioning, standalone checkpoint roundtrips, old global codecs,
 KL normalization, actor gradients through a frozen codec, raw critic interfaces,
-short trainer exports, and a real two-codec Hydra multirun. All three existing
+short trainer exports, a real two-codec Hydra multirun, reference RL settings,
+matched-noise baseline evaluation, and collision-safe launchers. All three existing
 PickBucket/FoldGlasses global codec checkpoints also loaded successfully.
 
 Real-data smoke runs use 10 episodes and 50 GPU optimization steps for each task,
@@ -79,13 +85,15 @@ validates execution and export; it does not establish final policy quality.
 
 ## Follow-on comparisons
 
-This run trains the codec. Residual RL training and simulator success-rate
-comparisons are separate follow-on stages. Keep the base policy, episode split,
+This run trained the codec. Residual RL will run on the server at the user's
+request; local RL main training was not started. Keep the base policy, episode split,
 seed, training budget and KL normalization fixed when comparing Global K8,
 Temporal K8, Temporal K9, and the scalar-budget control Global K128.
-Report raw-base, zero-residual codec projection and trained RL success separately;
-the existing RL checkpoint evaluation script still needs a separate projection
-baseline before that comparison stage is complete.
+Report raw-base, zero-residual codec projection and trained RL success separately.
+The trainer now records `pretrained`, `codec_projection`, and `finetuned` rows in
+`evaluation_results.csv`. The initial raw/projection pair shares environment seeds
+and flow noise; the added projection does not advance the training RNG stream.
+The standalone RL checkpoint evaluation script still reports only raw-base/RL.
 
 To use a completed codec with the existing residual RL configuration, override
 `model.chord_path` with that task's exported absolute `chord.pt` path. The actor

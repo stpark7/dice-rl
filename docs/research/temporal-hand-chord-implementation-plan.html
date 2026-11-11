@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temporal HandChord 구현계획</title>
+<style>
+:root{--ink:#193440;--muted:#5c717b;--line:#d9e2e5;--blue:#176784;--pale:#edf5f8;--orange:#a55328}
+*{box-sizing:border-box}body{margin:0;background:#f8faf9;color:var(--ink);font:15px/1.8 "Noto Sans CJK KR","Noto Sans KR",sans-serif;word-break:keep-all}main{max-width:1180px;margin:auto;padding:34px 36px 30px}header{margin-bottom:25px}header small{color:var(--muted);font-size:12px}h1{font-size:32px;letter-spacing:-.04em;line-height:1.4;margin:8px 0 10px}h2{font-size:21px;letter-spacing:-.03em;margin:0 0 12px}p{margin:8px 0;color:var(--muted)}section{padding:25px 0;border-top:1px solid var(--line)}code{font:12px/1.7 Consolas,"DejaVu Sans Mono",monospace;background:#eaf0f2;border-radius:3px;padding:2px 5px;overflow-wrap:anywhere}pre{margin:10px 0 0;background:#193440;color:#edf5f8;padding:18px;border-radius:7px;overflow:auto;font:12px/1.8 Consolas,"DejaVu Sans Mono",monospace}pre code{font:inherit;background:none;padding:0;color:inherit}.canvas{overflow:auto;background:white;border:1px solid var(--line);border-radius:8px;padding:12px}.canvas svg{display:block;width:100%;min-width:850px;height:auto}.caption{font-size:12px;margin-top:9px}.columns{display:grid;grid-template-columns:1fr 1fr;gap:22px}.columns h3{font-size:15px;margin:0}.table-wrap{overflow:auto;background:white;border:1px solid var(--line);border-radius:6px;margin-top:15px}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}th,td{padding:9px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{background:#edf3f5;font-weight:650}tr:last-child td{border-bottom:0}.steps{padding-left:23px;margin:0}.steps li{padding:5px 0}.steps small{display:block;font-size:13px;color:var(--muted)}.note{padding:12px 16px;background:var(--pale);border-left:3px solid var(--blue);font-size:13px;margin-top:15px}.note p{margin:0;color:var(--ink)}footer{color:var(--muted);font-size:12px;margin-top:10px}.node{fill:#edf5f8;stroke:#9dbfcd;stroke-width:1.3}.raw{fill:#f3f0f8;stroke:#c5b8d7;stroke-width:1.3}.actor{fill:#fff2e7;stroke:#d5a17e;stroke-width:1.3}.wire{fill:none;stroke:#708d9a;stroke-width:1.8;marker-end:url(#arrow)}.label{font:650 15px "Noto Sans CJK KR",sans-serif;fill:#193440}.dim{font:13px Consolas,monospace;fill:#176784}.sub{font:12px "Noto Sans CJK KR",sans-serif;fill:#5c717b}
+@media(max-width:700px){main{padding:24px 18px}h1{font-size:27px}.columns{grid-template-columns:1fr;gap:20px}body{font-size:14px}th,td{padding:8px 10px}section{padding:22px 0}}
+@media print{body{background:white}main{padding:0}.canvas svg{min-width:0}section{break-inside:avoid}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+</style>
+</head>
+<body><main>
+<header><small>구현계획 · 모델 구현 및 학습 전</small><h1>Temporal HandChord</h1><p>손 동작 전체를 8차원으로 요약하는 기존 codec에, 시간축을 유지하는 <strong>16×K latent codec</strong>을 추가합니다.</p></header>
+
+<section aria-labelledby="architecture"><h2 id="architecture">1. 모델 구조</h2>
+<div class="canvas"><svg viewBox="0 0 1120 355" role="img" aria-labelledby="diagram-title diagram-desc">
+<title id="diagram-title">Temporal HandChord residual RL 구조</title><desc id="diagram-desc">Base policy의 raw action을 팔과 손으로 나누고 손을 인코딩합니다. 팔과 손 latent를 묶어 actor residual을 더한 뒤 decode하여 raw action을 복원합니다.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#708d9a"/></marker></defs>
+<rect class="node" x="15" y="125" width="145" height="75" rx="7"/><text class="label" x="87" y="153" text-anchor="middle">Base policy</text><text class="dim" x="87" y="179" text-anchor="middle">16 × 22</text>
+<path class="wire" d="M160 162 H179 V70 H200"/><path class="wire" d="M179 162 V257 H200"/>
+<rect class="raw" x="200" y="40" width="135" height="60" rx="7"/><text class="label" x="267" y="65" text-anchor="middle">Arm</text><text class="dim" x="267" y="87" text-anchor="middle">16 × 6</text>
+<rect class="raw" x="200" y="227" width="135" height="60" rx="7"/><text class="label" x="267" y="252" text-anchor="middle">Hand</text><text class="dim" x="267" y="274" text-anchor="middle">16 × 16</text>
+<path class="wire" d="M335 257 H370"/>
+<rect class="node" x="370" y="220" width="153" height="74" rx="7"/><text class="label" x="446" y="247" text-anchor="middle">Temporal encoder</text><text class="dim" x="446" y="273" text-anchor="middle">z: 16 × 9</text>
+<path class="wire" d="M335 70 H560 V142 H580"/><path class="wire" d="M523 257 H560 V175 H580"/>
+<rect class="node" x="580" y="120" width="135" height="79" rx="7"/><text class="label" x="647" y="147" text-anchor="middle">Pack</text><text class="dim" x="647" y="172" text-anchor="middle">96 + 144 = 240</text><text class="sub" x="647" y="190" text-anchor="middle">arm block | hand code</text>
+<path class="wire" d="M715 160 H742"/><circle cx="760" cy="160" r="18" fill="#fff2e7" stroke="#d5a17e"/><text x="760" y="167" text-anchor="middle" font-size="23" fill="#a55328">+</text>
+<rect class="actor" x="674" y="249" width="172" height="64" rx="7"/><text class="label" x="760" y="274" text-anchor="middle">Residual actor</text><text class="dim" x="760" y="298" text-anchor="middle">Δp: 240</text><path class="wire" d="M760 249 V180"/>
+<path class="wire" d="M778 160 H814"/>
+<rect class="node" x="814" y="120" width="148" height="79" rx="7"/><text class="label" x="888" y="147" text-anchor="middle">Unpack + decode</text><text class="sub" x="888" y="173" text-anchor="middle">팔 유지 · 손 복원</text>
+<path class="wire" d="M962 160 H993"/>
+<rect class="raw" x="993" y="120" width="112" height="79" rx="7"/><text class="label" x="1049" y="147" text-anchor="middle">Raw action</text><text class="dim" x="1049" y="173" text-anchor="middle">16 × 22</text>
+<text class="sub" x="15" y="333">K9 예시 · Encoder/Decoder는 측정 손 자세 q₀에 조건화 · Codec은 사전학습 후 RL 중 고정</text>
+</svg></div>
+<p class="caption">기존 base policy와 raw critic/replay 인터페이스를 유지합니다. 좁은 화면에서는 그림을 좌우로 스크롤할 수 있습니다.</p>
+<div class="table-wrap"><table><thead><tr><th>비교 모델</th><th>손 latent</th><th>Actor 출력</th><th>비교 목적</th></tr></thead><tbody>
+<tr><td>Global K8</td><td>8</td><td>104</td><td>기존 구조</td></tr>
+<tr><td>Temporal K8</td><td>16 × 8</td><td>224</td><td>시간축 보존</td></tr>
+<tr><td>Temporal K9</td><td>16 × 9</td><td>240</td><td>논문의 K9 적용</td></tr>
+<tr><td>Global K128</td><td>128</td><td>224</td><td>Temporal K8과 latent scalar 수 일치</td></tr>
+</tbody></table></div>
+</section>
+
+<section aria-labelledby="hydra"><h2 id="hydra">2. Hydra에서 실험 전환</h2>
+<div class="columns"><div><h3>Codec 사전학습</h3><pre><code>codec: global_chunk
+codec_targets:
+  global_chunk: model.hand_chord.chunk_hand_chord.ChunkHandActionChord
+  temporal_chunk: model.hand_chord.temporal_hand_chord.TemporalHandActionChord
+model:
+  _target_: ${codec_targets.${codec}}
+  latent_dim: ${latent_dim}</code></pre><p class="caption">같은 학습 명령에 아래 override만 추가합니다.</p><pre><code>codec=temporal_chunk latent_dim=9
+
+# Global/Temporal K8 × seed 3개 비교
+-m codec=global_chunk,temporal_chunk \
+   latent_dim=8 seed=42,43,44 \
+   train_dataset.split_seed=0</code></pre></div>
+<div><h3>Residual RL</h3><pre><code># 기존 ft_hand_chord_residual_flow_unet_img 사용
+# 체크포인트 경로만 교체
+model.chord_path=/absolute/path/to/run/chord.pt</code></pre><p>체크포인트에서 codec 종류와 K를 읽어 actor 출력 크기를 자동으로 결정합니다.</p><p class="caption">RL 클래스·base checkpoint·action_dim=22·noise_dim=352는 그대로 사용합니다.</p></div></div>
+</section>
+
+<section aria-labelledby="implementation"><h2 id="implementation">3. 구현 순서</h2>
+<ol class="steps">
+<li><strong>Temporal codec 추가</strong><small><code>model/hand_chord/temporal_hand_chord.py</code>에 <code>TemporalHandActionChord</code> 구현. Encoder의 action 토큰마다 posterior를 만들고, decoder의 latent 반복을 제거합니다.</small></li>
+<li><strong>공통 인터페이스·로더 연결</strong><small><code>encode → packed / decode → raw action</code> 계약을 공유합니다. Trainer·best export·RL의 기존 클래스 직접 로딩을 교체하고 v1 global 체크포인트 호환성을 유지합니다.</small></li>
+<li><strong>Hydra selector와 저장 경로 정리</strong><small>기존 pretrain config에 위 selector를 추가합니다. 실행 이름에 codec·K를 기록하고 multirun도 <code>Hydra runtime.output_dir</code>에 설정과 체크포인트를 함께 저장합니다.</small></li>
+<li><strong>검증 후 동일 조건으로 비교</strong><small>Shape·팔 값 보존·저장/복원·actor gradient를 검사합니다. Raw base, residual이 0인 복원 정책, RL 정책의 성공률을 따로 측정합니다.</small></li>
+</ol>
+<div class="note"><p><strong>실험 조건:</strong> 같은 base·데이터 split·seed·학습 예산·KL 정규화를 사용합니다. 첫 비교에서는 시간 차분 loss를 0으로 두고, 이후 별도 실험으로 추가합니다.</p></div>
+</section>
+<footer>계획 문서만 수정했습니다. 모델 구현과 학습은 실행하지 않았습니다.</footer>
+</main></body></html>
