@@ -15,7 +15,9 @@ seed: 42
 device: cuda:0
 horizon_steps: 16
 latent_dim: 8
-wandb: null
+wandb:
+  entity: residual_rl
+  project: dexjoco-${env_name}-hand_chord
 
 train:
   n_steps: 30000

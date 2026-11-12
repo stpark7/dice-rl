@@ -6,3 +6,7 @@ env_name: fold_glasses
 latent_dim: 32
 train_dataset:
   max_n_episodes: 100
+
+wandb:
+  entity: residual_rl
+  project: dexjoco-${env_name}-hand_chord

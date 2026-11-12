@@ -68,8 +68,8 @@ shape_meta:
     shape: [22]
 
 wandb:
-  entity: null
-  project: dexjoco-${env_name}
+  entity: residual_rl
+  project: dexjoco-${env_name}-residual_rl
   run: dice-baseline-s${seed}
 
 train:

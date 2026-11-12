@@ -16,7 +16,8 @@ device: cuda:0
 horizon_steps: 16
 latent_dim: 8
 wandb:
-  project: dexjoco-${env_name}-handchord
+  entity: residual_rl
+  project: dexjoco-${env_name}-hand_chord
   run: chord_h${horizon_steps}_k${latent_dim}_seed${seed}_${now:%H-%M-%S}
 
 train:

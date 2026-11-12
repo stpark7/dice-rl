@@ -59,6 +59,7 @@ pip-wheel-metadata/
 share/python-wheels/
 
 # Virtual environments
+/.runtime-deps/
 .env
 .venv
 .venv-*/

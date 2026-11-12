@@ -62,7 +62,8 @@ shape_meta:
     shape: [22]
 
 wandb:
-  project: dexjoco-${env_name}-pretrain
+  entity: residual_rl
+  project: dexjoco-${env_name}-flow_matching
   run: ${now:%H-%M-%S}_${name}
 
 train:
