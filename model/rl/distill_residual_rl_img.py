@@ -86,7 +86,8 @@ class DistillResidualRLImgModel(DistillResidualRLModel):
         log.info("Pretrained image-based flow matching policy loaded and frozen successfully")
         return pretrained_model
     
-    def get_action(self, state: torch.Tensor, noise: torch.Tensor, return_pretrained_actions: bool = False):
+    def get_action(self, state: torch.Tensor, noise: torch.Tensor,
+                   return_pretrained_actions: bool = False, use_residual: bool = True):
         """
         Get action as sum of pretrained policy and residual actor.
         
@@ -96,6 +97,7 @@ class DistillResidualRLImgModel(DistillResidualRLModel):
             state: (B, cond_steps, augmented_obs_dim) - state with visual features already merged
             noise: (B, horizon_steps, action_dim) - noise for action generation
             return_pretrained_actions: if True, return tuple (total_actions, pretrained_actions)
+            use_residual: If False, return the frozen base policy without evaluating the actor.
             
         Returns:
             if return_pretrained_actions:
@@ -113,6 +115,9 @@ class DistillResidualRLImgModel(DistillResidualRLModel):
             )
             pretrained_actions = output.trajectories  # (B, horizon_steps, action_dim)
             pretrained_actions = pretrained_actions.detach()
+
+        if not use_residual:
+            return (pretrained_actions, pretrained_actions) if return_pretrained_actions else pretrained_actions
         
         # Get residual action from actor - condition on base action or noise
         if self.condition_residual_on_base_action:
@@ -452,4 +457,3 @@ class DistillResidualRLImgModel(DistillResidualRLModel):
             'residual_norm': residual_norm,
             'q_filtering_active': bc_filter.mean(),  # Mean of filtering mask
         }
-    

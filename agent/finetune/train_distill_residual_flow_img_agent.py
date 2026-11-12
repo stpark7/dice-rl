@@ -51,25 +51,26 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
         
         pretrained_config = OmegaConf.load(pretrained_config_path)
 
-        # Verify dataset configuration matches
-        pretrained_dataset_path = pretrained_config.train_dataset_path
-        current_dataset_path = cfg.expert_dataset.dataset_path
+        if cfg.get("use_rlpd", False):
+            # Verify dataset configuration matches
+            pretrained_dataset_path = pretrained_config.train_dataset_path
+            current_dataset_path = cfg.expert_dataset.dataset_path
         
-        # Normalize paths for comparison (resolve any env variables)
-        pretrained_dataset_path = os.path.expandvars(pretrained_dataset_path)
-        current_dataset_path = os.path.expandvars(current_dataset_path)
+            # Normalize paths for comparison (resolve any env variables)
+            pretrained_dataset_path = os.path.expandvars(pretrained_dataset_path)
+            current_dataset_path = os.path.expandvars(current_dataset_path)
         
-        # Verify max_n_episodes matches if available
-        pretrained_max_episodes = pretrained_config.train_dataset.max_n_episodes
-        current_max_episodes = cfg.expert_dataset.max_n_episodes
+            # Verify max_n_episodes matches if available
+            pretrained_max_episodes = pretrained_config.train_dataset.max_n_episodes
+            current_max_episodes = cfg.expert_dataset.max_n_episodes
         
-        assert pretrained_max_episodes == current_max_episodes, (
-            f"Max episodes mismatch!\n"
-            f"  Pretrained model used: {pretrained_max_episodes} episodes\n"
-            f"  Current config uses: {current_max_episodes} episodes\n"
-            f"  Please ensure max_n_episodes matches for consistent training."
-        )
-        log.info(f"✓ Max episodes verified: {current_max_episodes}")
+            assert pretrained_max_episodes == current_max_episodes, (
+                f"Max episodes mismatch!\n"
+                f"  Pretrained model used: {pretrained_max_episodes} episodes\n"
+                f"  Current config uses: {current_max_episodes} episodes\n"
+                f"  Please ensure max_n_episodes matches for consistent training."
+            )
+            log.info(f"✓ Max episodes verified: {current_max_episodes}")
         
         # Verify flow_steps/ddim_steps matches based on model type
         if hasattr(pretrained_config, 'flow_steps'):
@@ -179,8 +180,10 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             use_n_step=cfg.replay_buffer.get("use_n_step", False),
             n_step=cfg.replay_buffer.get("n_step", 1),
             # Expert dataset n-step settings (can differ from online data)
-            expert_use_n_step=cfg.replay_buffer.get("expert_use_n_step", False),
-            expert_n_step=cfg.replay_buffer.get("expert_n_step", 1),
+            expert_use_n_step=(cfg.replay_buffer.get("expert_use_n_step", False)
+                              if cfg.get("use_rlpd", False) else False),
+            expert_n_step=(cfg.replay_buffer.get("expert_n_step", 1)
+                           if cfg.get("use_rlpd", False) else 1),
         )
     
     def _preprocess_expert_dataset(self, expert_dataset):
@@ -349,7 +352,7 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
         
         return augmented_state  # Return as tensor
     
-    def get_action(self, obs_venv, strategy="standard"):
+    def get_action(self, obs_venv, strategy="standard", use_residual=True):
         """
         Override to extract visual features before getting action.
         
@@ -366,7 +369,11 @@ class TrainDistillResidualFlowImgAgent(TrainDistillResidualFlowAgent):
             augmented_state = self._extract_visual_features_from_obs(obs_venv)  # Returns tensor
             
             # Generate actions based on the specified strategy
-            if strategy != "standard":
+            if not use_residual:
+                noise_venv = torch.randn(augmented_state.shape[0], self.horizon_steps,
+                                         self.action_dim, device=self.device)
+                action_venv = self.model.get_action(augmented_state, noise_venv, use_residual=False)
+            elif strategy != "standard":
                 action_venv, noise_venv = self.model.get_exploration_action(
                     augmented_state, 
                     num_samples=self.num_exploration_samples,

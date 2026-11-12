@@ -165,7 +165,8 @@ class HandChordResidualRLImgModel(DistillResidualRLModel):
         self.chord.eval()
         return self
 
-    def get_action(self, state: torch.Tensor, noise: torch.Tensor, return_pretrained_actions: bool = False):
+    def get_action(self, state: torch.Tensor, noise: torch.Tensor,
+                   return_pretrained_actions: bool = False, use_residual: bool = True):
         """
         Get action by adding the residual to the pretrained action in latent residual space.
 
@@ -180,6 +181,7 @@ class HandChordResidualRLImgModel(DistillResidualRLModel):
             state: (B, cond_steps, augmented_obs_dim) - proprioception first, then visual features
             noise: (B, horizon_steps, action_dim) - noise for action generation
             return_pretrained_actions: if True, return tuple (total_actions, pretrained_actions)
+            use_residual: If False, bypass the actor and return the codec-projected base policy.
 
         Returns:
             if return_pretrained_actions:
@@ -198,6 +200,11 @@ class HandChordResidualRLImgModel(DistillResidualRLModel):
             )
             pretrained_actions = output.trajectories  # (B, horizon_steps, action_dim)
             pretrained_packed = self.chord.encode(pretrained_actions, proprioception)  # (B, chord_dim)
+
+        if not use_residual:
+            with torch.no_grad():
+                projected_actions = self.chord.decode(pretrained_packed, proprioception)
+            return (projected_actions, projected_actions) if return_pretrained_actions else projected_actions
 
         # Get packed residual from actor - condition on base action or noise
         if self.condition_residual_on_base_action:

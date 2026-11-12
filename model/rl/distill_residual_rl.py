@@ -922,7 +922,8 @@ class DistillResidualRLModel(nn.Module):
         loss_dict['critic_loss'] = total_loss
         return loss_dict
     
-    def get_action(self, state: torch.Tensor, noise: torch.Tensor, return_pretrained_actions: bool = False) -> torch.Tensor:
+    def get_action(self, state: torch.Tensor, noise: torch.Tensor,
+                   return_pretrained_actions: bool = False, use_residual: bool = True) -> torch.Tensor:
         """
         Get action as sum of pretrained policy and residual actor.
         
@@ -932,6 +933,7 @@ class DistillResidualRLModel(nn.Module):
             state: (B, cond_steps, obs_dim) - current state
             noise: (B, horizon_steps, action_dim) - noise for action generation
             return_pretrained_actions: If True, return tuple (total_actions, pretrained_actions)
+            use_residual: If False, return the frozen base policy without evaluating the actor.
             
         Returns:
             action: (B, horizon_steps, action_dim) - total action (pretrained + residual)
@@ -943,6 +945,9 @@ class DistillResidualRLModel(nn.Module):
             cond = {"state": state}
             pretrained_sample = self.pretrained_flow_policy(cond, deterministic=False, init_noise=noise)
             pretrained_actions = pretrained_sample.trajectories  # (B, horizon_steps, action_dim)
+
+        if not use_residual:
+            return (pretrained_actions, pretrained_actions) if return_pretrained_actions else pretrained_actions
         
         # Get residual action from actor - condition on base action or noise
         if self.condition_residual_on_base_action:
@@ -958,6 +963,32 @@ class DistillResidualRLModel(nn.Module):
             return total_actions, pretrained_actions
         return total_actions
     
+    @torch.no_grad()
+    def _compute_target_q(self, next_state, reward, done, gamma, n_steps,
+                          use_residual=True):
+        """Share online TD targets with critic pretraining on the frozen base policy."""
+        batch_size = next_state.shape[0]
+        next_noise = torch.randn(batch_size, self.horizon_steps, self.action_dim,
+                                 device=self.device)
+        # Keep existing subclasses' online get_action calls unchanged.
+        action_kwargs = {} if use_residual else {"use_residual": False}
+        if not self.multi_sample_next_noise:
+            next_actions = self.get_action(next_state, next_noise, **action_kwargs)
+            target_next_q = self.target_critic(next_state, next_noise, next_actions)
+        else:
+            K = self.num_next_noise_samples
+            noise_samples = torch.randn(K, batch_size, self.horizon_steps,
+                                         self.action_dim, device=self.device)
+            states = next_state.unsqueeze(0).expand(K, -1, -1, -1).reshape(
+                K * batch_size, *next_state.shape[1:])
+            noises = noise_samples.reshape(K * batch_size, *noise_samples.shape[2:])
+            next_actions = self.get_action(states, noises, **action_kwargs)
+            target_next_q = self.target_critic(states, noises, next_actions).reshape(
+                K, batch_size, 1).mean(dim=0)
+        gamma_effective = gamma ** n_steps.float() if self.use_n_step else gamma
+        target_q = reward + gamma_effective * (1 - done.float()) * target_next_q
+        return target_q, next_noise
+
     def loss(
         self,
         state: torch.Tensor,
@@ -971,6 +1002,7 @@ class DistillResidualRLModel(nn.Module):
         q_overestimation: Optional[torch.Tensor] = None,
         n_steps: Optional[torch.Tensor] = None,
         data_source: Optional[torch.Tensor] = None,
+        critic_only: bool = False,
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """
@@ -984,11 +1016,15 @@ class DistillResidualRLModel(nn.Module):
             reward: (B, 1) - reward
             done: (B, 1) - done flag
             gamma: float - discount factor
+            critic_only: Train Q on replay actions, bootstrapping from the base policy only.
             
         Returns:
             loss_dict: Dictionary containing all loss components
         """
-        batch_size = state.shape[0]
+        if critic_only:
+            target_q, _ = self._compute_target_q(
+                next_state, reward, done, gamma, n_steps, use_residual=False)
+            return self.critic_loss(state, noise, action, target_q, data_source=data_source)
         
         # All models work with the entire chunks - no need to extract single states/actions
         # Get current actions from actor for Q-value computation
@@ -996,48 +1032,9 @@ class DistillResidualRLModel(nn.Module):
 
         q_values = self.critic(state, noise, current_actions)  # (B, 1)
 
-        # Compute target Q-values using target networks (SAC-style)
-        with torch.no_grad():
-            # Sample noise for next actions (always single sample for actor loss consistency)
-            next_noise = torch.randn(batch_size, action.shape[1], self.action_dim, device=self.device)
-            
-            if not self.multi_sample_next_noise:
-                next_actions = self.get_action(next_state, next_noise)  # (B, horizon_steps, action_dim) - use get_action for residual RL compatibility
-                # Use target critic ensemble for stable targets
-                target_next_q = self.target_critic(next_state, next_noise, next_actions)  # (B, 1) - already min across ensemble
-                
-                # Apply appropriate discount factor based on training configuration
-                if self.use_n_step:
-                    # For n-step returns, use gamma^n_step
-                    gamma_effective = gamma ** n_steps.float()  # (B, 1)
-                else:
-                    # Default single-step return
-                    gamma_effective = gamma
-                    
-                target_q = reward + gamma_effective * (1 - done.float()) * target_next_q  # (B, 1) - reward already includes intrinsic or n-step rewards
-            else:
-                # Multi-sample for more stable Q-targets
-                K = self.num_next_noise_samples
-                next_noise_samples = torch.randn(K, batch_size, action.shape[1], self.action_dim, device=self.device)
-                next_state_rep = next_state.unsqueeze(0).expand(K, -1, -1, -1).reshape(K*batch_size, *next_state.shape[1:])
-                next_noise_flat = next_noise_samples.reshape(K*batch_size, *next_noise_samples.shape[2:])
-                next_actions = self.get_action(next_state_rep, next_noise_flat)  # (K*B, horizon_steps, action_dim)
+        target_q, next_noise = self._compute_target_q(
+            next_state, reward, done, gamma, n_steps)
 
-                target_q_samples = self.target_critic(next_state_rep, next_noise_flat, next_actions)  # (K*B, 1) - already min across ensemble
-                
-                # Standard mean aggregation
-                target_next_q = target_q_samples.reshape(K, batch_size, 1).mean(dim=0)  # (B, 1)
-                
-                # Apply appropriate discount factor based on training configuration
-                if self.use_n_step:
-                    # For n-step returns, use gamma^n_step
-                    gamma_effective = gamma ** n_steps.float()  # (B, 1)
-                else:
-                    # Default single-step return
-                    gamma_effective = gamma
-                    
-                target_q = reward + gamma_effective * (1 - done.float()) * target_next_q  # (B, 1) - reward already includes intrinsic or n-step rewards
-       
         # Compute all losses (pass pre-computed current_actions to avoid redundant call)
         actor_losses = self.actor_loss(
             state, noise, current_actions, q_values, next_state, next_noise, training_step, q_overestimation, data_source=data_source

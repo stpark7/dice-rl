@@ -25,6 +25,7 @@ from env.gym_utils import make_async
 class TrainDistillResidualFlowAgent(TrainAgent):
     
     def __init__(self, cfg):
+        self._configure_warmup(cfg)
         cfg = self._setup_upsampling_wrapper(cfg)
         
         super().__init__(cfg)
@@ -41,6 +42,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
 
         # Set up replay buffer
         self._setup_replay_buffer(cfg)
+        if (not self.warmup_complete and
+                max(cfg.train.batch_size, self.buffer_warmup_transitions) > self.replay_buffer.max_size):
+            raise ValueError("Warmup requires more online chunks than replay_buffer.max_size")
         
         # Training parameters
         self.num_train_steps = cfg.train.get("num_train_steps", 100000)
@@ -50,7 +54,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         self.update_freq = cfg.train.get("update_freq", 1)
         self.gradient_steps = cfg.train.get("gradient_steps", 1)
 
-        self.max_n_episodes = cfg.expert_dataset.get("max_n_episodes", 50)
+        self.max_n_episodes = (cfg.expert_dataset.get("max_n_episodes", 50)
+                               if cfg.get("use_rlpd", False) else 0)
         
         # Delayed update frequencies (like CURL/SAC)
         self.actor_update_freq = cfg.train.get("actor_update_freq", 1)  # Update actor every N steps
@@ -139,6 +144,79 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         self.eval_csv_path = os.path.join(self.logdir, "evaluation_results.csv")
         self._init_eval_csv()
     
+    def _configure_warmup(self, cfg):
+        """Warmup counts stored online chunks and critic gradient updates separately."""
+        for name in ("buffer_warmup_transitions", "critic_pretrain_steps"):
+            value = cfg.train.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"train.{name} must be a nonnegative integer")
+            setattr(self, name, value)
+        self.critic_pretrain_expert_ratio = cfg.train.get("critic_pretrain_expert_ratio", .5)
+        self.critic_pretrain_lr = cfg.train.get("critic_pretrain_lr", cfg.train.critic_lr)
+        if not 0 <= self.critic_pretrain_expert_ratio <= 1:
+            raise ValueError("critic_pretrain_expert_ratio must be between zero and one")
+        if not math.isfinite(self.critic_pretrain_lr) or self.critic_pretrain_lr <= 0:
+            raise ValueError("critic_pretrain_lr must be finite and positive")
+        self.warmup_complete = not (self.buffer_warmup_transitions or self.critic_pretrain_steps)
+        if not self.warmup_complete:
+            required = max(cfg.train.batch_size, self.buffer_warmup_transitions)
+            # Missing capacities are validated against the instantiated buffer:
+            # image and state trainers have different historical defaults.
+            if required > cfg.replay_buffer.get("max_size", math.inf):
+                raise ValueError("Warmup requires more online chunks than replay_buffer.max_size")
+        self.critic_pretrain_updates = 0
+        self.simulator_steps = 0
+
+    def _pretrain_critic(self):
+        """Optional explicit warmup; zero updates selects implicit warmup only."""
+        if self.warmup_complete:
+            return
+        online_lrs = [group["lr"] for group in self.critic_optimizer.param_groups]
+        expert_ratio = (self.critic_pretrain_expert_ratio
+                        if self.cfg.get("use_rlpd", False) else 0.)
+        log.info("Starting critic pretraining: %d updates, expert_ratio=%.2f",
+                 self.critic_pretrain_steps, expert_ratio)
+        metrics = {}
+        try:
+            for group in self.critic_optimizer.param_groups:
+                group["lr"] = self.critic_pretrain_lr
+            while self.critic_pretrain_updates < self.critic_pretrain_steps:
+                count = min(self.gradient_steps,
+                            self.critic_pretrain_steps - self.critic_pretrain_updates)
+                batches = self.replay_buffer.sample_batches(
+                    self.batch_size, count, expert_ratio=expert_ratio)
+                for batch in batches:
+                    if self.log_q_overestimation:
+                        state, noise, action, reward, next_state, done, _, n_steps, data_source = batch
+                    else:
+                        state, noise, action, reward, next_state, done, n_steps, data_source = batch
+                    self.critic_optimizer.zero_grad(set_to_none=True)
+                    losses = self.model.loss(
+                        state=state, noise=noise, action=action, next_state=next_state,
+                        reward=reward, done=done, gamma=self.gamma, n_steps=n_steps,
+                        data_source=data_source, critic_only=True)
+                    losses["critic_loss"].backward()
+                    if self.max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.critic.parameters(), self.max_grad_norm)
+                    self.critic_optimizer.step()
+                    self.critic_pretrain_updates += 1
+                    if self.critic_pretrain_updates % self.critic_target_update_freq == 0:
+                        self.model.update_target_networks(tau=self.tau)
+                    if (self.critic_pretrain_updates % 100 == 0 or
+                            self.critic_pretrain_updates == self.critic_pretrain_steps):
+                        metrics = {"warmup/critic_loss": losses["critic_loss"].item(),
+                                   "warmup/critic_updates": self.critic_pretrain_updates}
+                        log.info("Critic pretraining %d/%d: loss=%.4f",
+                                 self.critic_pretrain_updates, self.critic_pretrain_steps,
+                                 metrics["warmup/critic_loss"])
+        finally:
+            # Online schedulers retain their original position and starting LR.
+            for group, lr in zip(self.critic_optimizer.param_groups, online_lrs):
+                group["lr"] = lr
+        self.warmup_complete = True
+        if self.use_wandb and metrics:
+            wandb.log(metrics, step=self.current_training_step * self.horizon_steps * self.n_envs)
+
     def _init_eval_csv(self):
         """Initialize CSV file with headers for evaluation results."""
         with open(self.eval_csv_path, 'w', newline='') as csvfile:
@@ -197,8 +275,10 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             use_n_step=cfg.replay_buffer.get("use_n_step", False),
             n_step=cfg.replay_buffer.get("n_step", 1),
             # Expert dataset n-step settings (can differ from online data)
-            expert_use_n_step=cfg.replay_buffer.get("expert_use_n_step", False),
-            expert_n_step=cfg.replay_buffer.get("expert_n_step", 1),
+            expert_use_n_step=(cfg.replay_buffer.get("expert_use_n_step", False)
+                              if cfg.get("use_rlpd", False) else False),
+            expert_n_step=(cfg.replay_buffer.get("expert_n_step", 1)
+                           if cfg.get("use_rlpd", False) else 1),
         )
     
     def get_current_expert_ratio(self, env_steps):
@@ -211,6 +291,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         Returns:
             expert_ratio: Current expert ratio for RLPD sampling
         """
+        if not self.cfg.get("use_rlpd", False):
+            return 0.
         if not self.use_adaptive_expert_ratio:
             # Use fixed expert ratio from config
             return self.cfg.get("expert_ratio", 0.5)
@@ -409,7 +491,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
 
         return loss_dict, current_expert_ratio
     
-    def get_action(self, obs_venv, strategy="standard"):
+    def get_action(self, obs_venv, strategy="standard", use_residual=True):
         """
         Get actions from the distilled actor using the specified strategy.
         
@@ -431,7 +513,11 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 state_venv = torch.tensor(obs_venv, dtype=torch.float32, device=self.device)  # (n_envs, cond_steps, obs_dim)
             
             # Generate actions based on the specified strategy
-            if strategy != "standard":
+            if not use_residual:
+                noise_venv = torch.randn(state_venv.shape[0], self.horizon_steps,
+                                         self.action_dim, device=self.device)
+                action_venv = self.model.get_action(state_venv, noise_venv, use_residual=False)
+            elif strategy != "standard":
                 # Use exploration action method for non-standard strategies
                 action_venv, noise_venv = self.model.get_exploration_action(
                     state_venv, 
@@ -730,6 +816,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
         Returns:
             List of expert trajectory arrays with only robot EEF positions, subsampled
         """
+        if not self.cfg.get("use_rlpd", False):
+            return []
         if not hasattr(self.cfg, 'expert_dataset') or 'dataset_path' not in self.cfg.expert_dataset:
             log.warning("No expert dataset path available for trajectory extraction")
             return []
@@ -901,7 +989,7 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             
         # Start training loop
         timer = Timer()
-        # Reset step counter for online RL (warmstart steps don't count towards online training)
+        # Warmup rollout calls count toward the same environment interaction budget.
         total_steps = 0
         self.current_training_step = 0  # Initialize training step tracker
         
@@ -925,7 +1013,10 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                     self.evaluate(total_steps)
                 
             # Get chunked actions and noise using online exploration strategy
-            action_venv, noise_venv = self.get_action(prev_obs_venv, strategy=self.online_explore_strategy)
+            if self.warmup_complete:
+                action_venv, noise_venv = self.get_action(prev_obs_venv, strategy=self.online_explore_strategy)
+            else:
+                action_venv, noise_venv = self.get_action(prev_obs_venv, use_residual=False)
             
             # Extract action chunk for environment step
             action_chunk = action_venv[:, : self.act_steps]  # (n_envs, act_steps, action_dim)
@@ -933,6 +1024,8 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             # # Step environment
             obs_venv, reward_venv, terminated_venv, truncated_venv, info_venv = self.venv.step(action_chunk.cpu().numpy())
             done_venv = terminated_venv | truncated_venv
+            self.simulator_steps += sum(len(info["full_trajectory"]["actions"])
+                                        for info in info_venv)
             
             # Convert rewards and done flags to tensors
             reward_venv_tensor = torch.tensor(reward_venv, dtype=torch.float32, device=self.device)
@@ -986,6 +1079,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                         'train/success_rate': train_success_rate,
                         'buffer/size': len(self.replay_buffer),
                         'buffer/num_online_episodes': self.replay_buffer.num_episodes,
+                        'train/rollout_steps': total_steps + 1,
+                        'train/simulator_steps': self.simulator_steps,
+                        'warmup/critic_updates': self.critic_pretrain_updates,
                     }, step=total_steps*self.horizon_steps*self.n_envs)
                 
                 # Clear completed episodes (or keep a sliding window)
@@ -994,7 +1090,12 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             
             # Update networks
             # Skip updates during initial exploration phase
-            if (self.replay_buffer.get_total_transitions() >= self.batch_size and 
+            if (not self.warmup_complete and self.replay_buffer.get_total_transitions() >=
+                    max(self.batch_size, self.buffer_warmup_transitions)):
+                self._pretrain_critic()
+
+            if (self.warmup_complete and
+                self.replay_buffer.get_total_transitions() >= self.batch_size and
                 total_steps % self.update_freq == 0):
                 
                 # Accumulate metrics to log once at the end
@@ -1062,6 +1163,11 @@ class TrainDistillResidualFlowAgent(TrainAgent):
                 log.info(f"Step {total_steps}/{self.num_train_steps}: "
                         f"buffer_size={len(self.replay_buffer)}")
             
+        if not self.warmup_complete:
+            log.warning("Training budget ended before warmup collected enough online chunks: %d/%d",
+                        self.replay_buffer.get_total_transitions(),
+                        max(self.batch_size, self.buffer_warmup_transitions))
+
         # Final evaluation and save
         if self.cfg.get('run_eval', False) and hasattr(self, 'eval_venv'):
             self.evaluate(total_steps)
@@ -1080,6 +1186,9 @@ class TrainDistillResidualFlowAgent(TrainAgent):
             'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
             'step': step,
             'config': self.cfg,
+            'warmup_complete': self.warmup_complete,
+            'critic_pretrain_updates': self.critic_pretrain_updates,
+            'simulator_steps': self.simulator_steps,
         }
 
         if self.actor_scheduler is not None:
