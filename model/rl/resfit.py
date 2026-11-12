@@ -5,6 +5,7 @@ actor and LayerNorm Q ensemble operate on those features at every control step;
 the caller owns the base policy's action-chunk queues and n-step replay.
 """
 
+from contextlib import contextmanager
 import copy
 from pathlib import Path
 
@@ -47,6 +48,19 @@ def load_base_policy(checkpoint_path, device, config_path=None, weights="model")
     return policy
 
 
+@contextmanager
+def frozen(module):
+    """Let a loss backpropagate through module's inputs but not into its weights."""
+    parameters = list(module.parameters())
+    flags = [parameter.requires_grad for parameter in parameters]
+    module.requires_grad_(False)
+    try:
+        yield
+    finally:
+        for parameter, flag in zip(parameters, flags):
+            parameter.requires_grad_(flag)
+
+
 def _mlp(input_dim, hidden_dims, output_dim):
     layers = []
     for width in hidden_dims:
@@ -82,28 +96,20 @@ class QEnsemble(nn.Module):
         return torch.stack([head(inputs).squeeze(-1) for head in self.heads], dim=0)
 
 
-class ResFiTModel(nn.Module):
+class FrozenBCPolicyModel(nn.Module):
+    """Native frozen BC loading, observation encoding and chunk prediction."""
+
     def __init__(
         self, obs_dim, action_dim, horizon_steps, cond_steps=1,
         pretrained_policy_path=None, pretrained_config_path=None,
         base_policy_weights="model", pretrained_policy=None, visual_feature_dim=None,
-        actor_hidden_dims=(1024, 1024), critic_hidden_dims=(1024, 1024),
-        critic_ensemble_size=10, target_subset_size=2, residual_scale=0.2,
-        exploration_std=0.05, target_noise_clip=0.3, device="cpu",
+        device="cpu",
     ):
         super().__init__()
-        if not 1 <= target_subset_size <= critic_ensemble_size:
-            raise ValueError("target_subset_size must be between 1 and critic_ensemble_size")
-        if residual_scale < 0 or exploration_std < 0 or target_noise_clip < 0:
-            raise ValueError("Residual scale and noise parameters must be nonnegative")
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
         self.horizon_steps = int(horizon_steps)
         self.cond_steps = int(cond_steps)
-        self.target_subset_size = int(target_subset_size)
-        self.residual_scale = float(residual_scale)
-        self.exploration_std = float(exploration_std)
-        self.target_noise_clip = float(target_noise_clip)
         if pretrained_policy is None:
             if pretrained_policy_path is None:
                 raise ValueError("pretrained_policy_path or pretrained_policy is required")
@@ -122,26 +128,14 @@ class ResFiTModel(nn.Module):
             visual_feature_dim = getattr(network, "visual_feature_dim", 0)
         self.visual_feature_dim = int(visual_feature_dim)
         self.feature_dim = self.cond_steps * self.obs_dim + self.visual_feature_dim
-        self.actor = ResidualActor(
-            self.feature_dim, self.action_dim, actor_hidden_dims, self.residual_scale
-        )
-        self.critics = QEnsemble(
-            self.feature_dim, self.action_dim, critic_hidden_dims, critic_ensemble_size
-        )
-        self.actor_target = copy.deepcopy(self.actor).requires_grad_(False)
-        self.critic_target = copy.deepcopy(self.critics).requires_grad_(False)
-        self.to(device)
-        self.train()
 
     @property
     def device(self):
-        return next(self.actor.parameters()).device
+        return next(self.parameters()).device
 
     def train(self, mode=True):
         super().train(mode)
         self.base_policy.eval()
-        self.actor_target.eval()
-        self.critic_target.eval()
         return self
 
     def _condition(self, obs):
@@ -189,15 +183,51 @@ class ResFiTModel(nn.Module):
             raise ValueError("BC returned an incompatible action chunk")
         return actions.detach()
 
+
+class ResFiTModel(FrozenBCPolicyModel):
+    def __init__(
+        self, obs_dim, action_dim, horizon_steps, cond_steps=1,
+        pretrained_policy_path=None, pretrained_config_path=None,
+        base_policy_weights="model", pretrained_policy=None, visual_feature_dim=None,
+        actor_hidden_dims=(1024, 1024), critic_hidden_dims=(1024, 1024),
+        critic_ensemble_size=10, target_subset_size=2, residual_scale=0.2,
+        exploration_std=0.05, target_noise_clip=0.3, device="cpu",
+    ):
+        if not 1 <= target_subset_size <= critic_ensemble_size:
+            raise ValueError("target_subset_size must be between 1 and critic_ensemble_size")
+        if residual_scale < 0 or exploration_std < 0 or target_noise_clip < 0:
+            raise ValueError("Residual scale and noise parameters must be nonnegative")
+        super().__init__(
+            obs_dim, action_dim, horizon_steps, cond_steps,
+            pretrained_policy_path, pretrained_config_path, base_policy_weights,
+            pretrained_policy, visual_feature_dim, device,
+        )
+        self.target_subset_size = int(target_subset_size)
+        self.residual_scale = float(residual_scale)
+        self.exploration_std = float(exploration_std)
+        self.target_noise_clip = float(target_noise_clip)
+        self.actor = ResidualActor(
+            self.feature_dim, self.action_dim, actor_hidden_dims, self.residual_scale
+        )
+        self.critics = QEnsemble(
+            self.feature_dim, self.action_dim, critic_hidden_dims, critic_ensemble_size
+        )
+        self.actor_target = copy.deepcopy(self.actor).requires_grad_(False)
+        self.critic_target = copy.deepcopy(self.critics).requires_grad_(False)
+        self.to(device)
+        self.train()
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.actor_target.eval()
+        self.critic_target.eval()
+        return self
+
     @torch.no_grad()
-    def act(self, features, base_action, std=0.0, warmup=False, warmup_noise=None):
-        if warmup:
-            scale = self.residual_scale if warmup_noise is None else float(warmup_noise)
-            residual = torch.empty_like(base_action).uniform_(-scale, scale)
-        else:
-            residual = self.actor(features, base_action)
-            if std:
-                residual = residual + torch.randn_like(residual) * std
+    def act(self, features, base_action, std=0.0):
+        residual = self.actor(features, base_action)
+        if std:
+            residual = residual + torch.randn_like(residual) * std
         return (base_action + residual).clamp(-1.0, 1.0)
 
     def critic_loss(self, batch):
@@ -218,16 +248,8 @@ class ResFiTModel(nn.Module):
         features = batch["obs"].detach()
         base = batch["base_action"].detach()
         action = (base + self.actor(features, base)).clamp(-1., 1.)
-        # Preserve gradients through Q's action input without accumulating Q gradients.
-        parameters = list(self.critics.parameters())
-        flags = [parameter.requires_grad for parameter in parameters]
-        try:
-            for parameter in parameters:
-                parameter.requires_grad_(False)
+        with frozen(self.critics):
             return -self.critics(features, action).mean()
-        finally:
-            for parameter, flag in zip(parameters, flags):
-                parameter.requires_grad_(flag)
 
     @torch.no_grad()
     def update_targets(self, tau, update_actor=True):

@@ -2,7 +2,8 @@
 
 All rollout and scheduling units are individual environment transitions, summed
 across vector workers. The native BC visual encoder is frozen; replay stores
-its features instead of images (see docs/RESFIT.md for this adaptation).
+its features instead of images. TrainDAWNAgent reuses this rollout, evaluation
+and checkpoint machinery through the underscore-prefixed hooks.
 """
 
 import csv
@@ -23,32 +24,36 @@ log = logging.getLogger(__name__)
 
 
 def replay_next_observation(next_obs, truncated, infos):
-    """Recover pre-reset timeout observations for n-step bootstrapping."""
+    """Recover pre-reset timeout observations for bootstrapping."""
     result = {key: np.array(value, copy=True) for key, value in next_obs.items()}
     for index in np.flatnonzero(truncated):
         if 'final_obs' not in infos[index]:
-            raise ValueError('ResFiT timeout replay requires info["final_obs"] before auto-reset')
+            raise ValueError('Timeout replay requires info["final_obs"] before auto-reset')
         for key in result:
             result[key][index] = infos[index]['final_obs'][key]
     return result
 
 
 class TrainResFiTAgent:
+    algorithm = 'ResFiT'
+    model_config_fields = (
+        'residual_scale', 'exploration_std', 'target_noise_clip',
+        'actor_hidden_dims', 'critic_hidden_dims', 'critic_ensemble_size',
+        'target_subset_size',
+    )
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.mode = cfg.get('mode', 'train')
         if self.mode not in ('train', 'eval'):
             raise ValueError('mode must be train or eval')
         if cfg.act_steps != 1 or cfg.env.wrappers.multi_step.n_action_steps != 1:
-            raise ValueError('ResFiT requires act_steps=1 and multi_step.n_action_steps=1')
+            raise ValueError(f'{self.algorithm} requires act_steps=1 and multi_step.n_action_steps=1')
         if not cfg.env.wrappers.multi_step.reset_within_step:
-            raise ValueError('ResFiT requires multi_step.reset_within_step=true')
+            raise ValueError(f'{self.algorithm} requires multi_step.reset_within_step=true')
         if not 1 <= cfg.bc_action_steps <= cfg.horizon_steps:
             raise ValueError('bc_action_steps must be between 1 and horizon_steps')
-        if cfg.train.batch_size < 2 or cfg.train.batch_size % 2:
-            raise ValueError('ResFiT requires an even batch_size for equal demo/online sampling')
-        if cfg.train.utd_ratio < 1 or int(cfg.train.utd_ratio) != cfg.train.utd_ratio:
-            raise ValueError('train.utd_ratio must be a positive integer')
+        self._validate_training_config()
         if min(cfg.env.n_envs, cfg.eval_n_envs, cfg.num_eval_episodes,
                cfg.env.max_episode_steps) < 1:
             raise ValueError('Environment and evaluation counts must be positive')
@@ -65,8 +70,7 @@ class TrainResFiTAgent:
         self.checkpoint_dir = self.logdir / 'checkpoint'
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.model = hydra.utils.instantiate(cfg.model).to(self.device)
-        self.actor_optimizer = torch.optim.AdamW(self.model.actor.parameters(), lr=cfg.train.actor_lr)
-        self.critic_optimizer = torch.optim.AdamW(self.model.critics.parameters(), lr=cfg.train.critic_lr)
+        self._configure_optimizers()
         self.env_steps = 0
         self.update_steps = 0
         if cfg.get('checkpoint_path'):
@@ -80,6 +84,18 @@ class TrainResFiTAgent:
                 name=self.logdir.name,
                 config=OmegaConf.to_container(cfg, resolve=True),
             )
+
+    def _validate_training_config(self):
+        if self.cfg.train.batch_size < 2 or self.cfg.train.batch_size % 2:
+            raise ValueError('ResFiT requires an even batch_size for equal demo/online sampling')
+        if self.cfg.train.utd_ratio < 1 or int(self.cfg.train.utd_ratio) != self.cfg.train.utd_ratio:
+            raise ValueError('train.utd_ratio must be a positive integer')
+
+    def _configure_optimizers(self):
+        self.actor_optimizer = torch.optim.AdamW(
+            self.model.actor.parameters(), lr=self.cfg.train.actor_lr)
+        self.critic_optimizer = torch.optim.AdamW(
+            self.model.critics.parameters(), lr=self.cfg.train.critic_lr)
 
     def _make_env(self, n_envs):
         from env.gym_utils import make_async
@@ -116,37 +132,72 @@ class TrainResFiTAgent:
         from util.resfit_demos import prepare_resfit_demos
         return prepare_resfit_demos(self.model, self.cfg)
 
+    def _prepare_replay(self):
+        cfg = self.cfg
+        self.demos = self._prepare_demos()
+        if not len(self.demos):
+            raise ValueError('ResFiT requires a nonempty expert dataset')
+        self.replay = ResFiTReplayBuffer(
+            cfg.replay_buffer.max_size, cfg.env.n_envs,
+            n_step=cfg.train.n_step, gamma=cfg.train.gamma, seed=cfg.seed,
+        )
+        self._critic_warmed = False
+        self._online_updates = 0
+
+    def _training_action(self, features, base):
+        if self.env_steps < self.cfg.train.buffer_warmup_steps:
+            scale = self.cfg.train.warmup_noise_scale
+            noise = torch.empty_like(base).uniform_(-scale, scale)
+            return (base + noise).clamp(-1, 1)
+        return self.model.act(features, base, std=self.model.exploration_std)
+
+    def _replay_reward(self, reward):
+        return reward
+
+    def _train_on_replay(self):
+        cfg = self.cfg
+        metrics = {}
+        if self.env_steps >= cfg.train.buffer_warmup_steps and len(self.replay):
+            if not self._critic_warmed:
+                log.info('Running %d critic-only warmup updates', cfg.train.critic_warmup_steps)
+                for _ in range(cfg.train.critic_warmup_steps):
+                    metrics = self._update(actor=False)
+                self._critic_warmed = True
+            for _ in range(cfg.train.utd_ratio * cfg.env.n_envs):
+                self._online_updates += 1
+                metrics = self._update(actor=self._online_updates % cfg.train.utd_ratio == 0)
+        return metrics
+
     def _batch(self):
         half = self.cfg.train.batch_size // 2
         online = self.replay.sample(half, self.device)
         demos = self.demos.sample(half, self.device)
         return {key: torch.cat([online[key], demos[key]], dim=0) for key in online}
 
+    def _step(self, optimizer, loss, *clipped):
+        """Apply one optimizer step, clipping each given parameter group's norm."""
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        maximum = self.cfg.train.get('max_grad_norm')
+        if maximum is not None:
+            for parameters in clipped:
+                torch.nn.utils.clip_grad_norm_(parameters, maximum)
+        optimizer.step()
+        return float(loss.detach())
+
     def _update(self, actor=False):
         batch = self._batch()
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        critic_loss = self.model.critic_loss(batch)
-        critic_loss.backward()
-        if self.cfg.train.get('max_grad_norm') is not None:
-            torch.nn.utils.clip_grad_norm_(self.model.critics.parameters(), self.cfg.train.max_grad_norm)
-        self.critic_optimizer.step()
-        metrics = {'critic_loss': float(critic_loss.detach())}
+        metrics = {'critic_loss': self._step(
+            self.critic_optimizer, self.model.critic_loss(batch), self.model.critics.parameters())}
         if actor:
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            # Q must propagate action gradients without accumulating critic grads.
-            self.model.critics.requires_grad_(False)
-            try:
-                actor_loss = self.model.actor_loss(batch)
-                actor_loss.backward()
-                if self.cfg.train.get('max_grad_norm') is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.actor.parameters(), self.cfg.train.max_grad_norm)
-                self.actor_optimizer.step()
-            finally:
-                self.model.critics.requires_grad_(True)
-            metrics['actor_loss'] = float(actor_loss.detach())
+            metrics['actor_loss'] = self._step(
+                self.actor_optimizer, self.model.actor_loss(batch), self.model.actor.parameters())
         self.model.update_targets(self.cfg.train.tau, update_actor=actor)
         self.update_steps += 1
         return metrics
+
+    def _extra_checkpoint_state(self):
+        return {}
 
     def _save_checkpoint(self):
         path = self.checkpoint_dir / f'state_{self.env_steps}.pt'
@@ -158,8 +209,9 @@ class TrainResFiTAgent:
             'cfg': OmegaConf.to_container(self.cfg, resolve=True),
             'observation_settings': self._observation_settings(),
             'base_policy_settings': self._base_policy_settings(),
+            **self._extra_checkpoint_state(),
         }, path)
-        log.info('Saved ResFiT checkpoint to %s', path)
+        log.info('Saved %s checkpoint to %s', self.algorithm, path)
         return path
 
     def _observation_settings(self):
@@ -203,9 +255,9 @@ class TrainResFiTAgent:
         if checkpoint.get('base_policy_settings', base_policy_settings) != base_policy_settings:
             raise ValueError('Checkpoint BC inference settings differ: check the saved base policy Hydra config')
         saved_model = saved_cfg.get('model', {})
-        for key in ('residual_scale', 'exploration_std', 'target_noise_clip',
-                    'actor_hidden_dims', 'critic_hidden_dims', 'critic_ensemble_size',
-                    'target_subset_size'):
+        if saved_model.get('_target_', self.cfg.model.get('_target_')) != self.cfg.model.get('_target_'):
+            raise ValueError('Checkpoint model target differs from Hydra config')
+        for key in self.model_config_fields:
             if key in saved_model and saved_model[key] != self.cfg.model.get(key):
                 raise ValueError(f'Checkpoint model.{key} differs from Hydra config; use the training value')
         self.model.load_state_dict(checkpoint['model'])
@@ -213,7 +265,7 @@ class TrainResFiTAgent:
             self.env_steps = checkpoint.get('env_steps', 0)
             self.update_steps = checkpoint.get('update_steps', 0)
         else:
-            log.info('Warm-started ResFiT weights; using fresh replay, optimizers and warmup')
+            log.info('Warm-started %s weights; using fresh replay, optimizers and warmup', self.algorithm)
 
     def _record_evaluation(self, metrics):
         path = self.logdir / 'eval.csv'
@@ -265,9 +317,9 @@ class TrainResFiTAgent:
                     finished = np.arange(cfg.eval_n_envs) >= count
                     for _ in range(cfg.env.max_episode_steps):
                         base = queue.next(obs)
-                        action = (self.model.act(self.model.encode(obs), base, std=0.)
-                                  if use_residual else base.clamp(-1, 1))
-                        obs, reward, terminated, truncated, _ = env.step(action[:, None].cpu().numpy())
+                        action = self.model.act(self.model.encode(obs), base) if use_residual else base
+                        obs, reward, terminated, truncated, _ = env.step(
+                            action.clamp(-1, 1)[:, None].cpu().numpy())
                         active = ~finished
                         returns[active] += np.asarray(reward).reshape(-1)[active]
                         durations[active] += 1
@@ -299,13 +351,7 @@ class TrainResFiTAgent:
                 self._record_evaluation(results)
                 return results
 
-            self.demos = self._prepare_demos()
-            if not len(self.demos):
-                raise ValueError('ResFiT requires a nonempty expert dataset')
-            self.replay = ResFiTReplayBuffer(
-                cfg.replay_buffer.max_size, cfg.env.n_envs,
-                n_step=cfg.train.n_step, gamma=cfg.train.gamma, seed=cfg.seed,
-            )
+            self._prepare_replay()
             last_eval_steps = None
             if evaluation_env is not None:
                 results = {'rl': self.evaluate(evaluation_env)}
@@ -318,25 +364,18 @@ class TrainResFiTAgent:
             obs = self._reset(training_env, cfg.env.n_envs)
             queue = self._queue(cfg.env.n_envs)
             base = queue.next(obs)
-            critic_warmed = False
-            online_updates = 0
             metrics = {}
             while self.env_steps < cfg.train.num_train_steps:
                 previous_steps = self.env_steps
                 with torch.no_grad():
                     features = self.model.encode(obs)
-                    if self.env_steps < cfg.train.buffer_warmup_steps:
-                        noise = torch.empty_like(base).uniform_(
-                            -cfg.train.warmup_noise_scale, cfg.train.warmup_noise_scale)
-                        action = (base + noise).clamp(-1, 1)
-                    else:
-                        action = self.model.act(features, base, std=self.model.exploration_std)
+                    action = self._training_action(features, base)
                     next_obs, reward, terminated, truncated, infos = training_env.step(
-                        action[:, None].cpu().numpy())
+                        action.clamp(-1, 1)[:, None].cpu().numpy())
                     transition_obs = replay_next_observation(next_obs, truncated, infos)
                     next_features = self.model.encode(transition_obs)
                     next_base = queue.next(transition_obs)
-                    self.replay.add(features, base, action, reward, next_features, next_base,
+                    self.replay.add(features, base, action, self._replay_reward(reward), next_features, next_base,
                                     terminated, truncated)
                     done_indices = np.flatnonzero(np.asarray(terminated) | np.asarray(truncated))
                     queue.reset(done_indices)
@@ -344,15 +383,9 @@ class TrainResFiTAgent:
                         next_base[done_indices] = queue.next(next_obs, indices=done_indices)
                     obs, base = next_obs, next_base
                 self.env_steps += cfg.env.n_envs
-                if self.env_steps >= cfg.train.buffer_warmup_steps and len(self.replay):
-                    if not critic_warmed:
-                        log.info('Running %d critic-only warmup updates', cfg.train.critic_warmup_steps)
-                        for _ in range(cfg.train.critic_warmup_steps):
-                            metrics = self._update(actor=False)
-                        critic_warmed = True
-                    for _ in range(cfg.train.utd_ratio * cfg.env.n_envs):
-                        online_updates += 1
-                        metrics = self._update(actor=online_updates % cfg.train.utd_ratio == 0)
+                updates = self._train_on_replay()
+                if updates:
+                    metrics = updates
                 for name in ('eval', 'save', 'log'):
                     frequency = cfg.train.get(f'{name}_freq', 0)
                     if frequency <= 0 or self.env_steps // frequency == previous_steps // frequency:
@@ -363,8 +396,8 @@ class TrainResFiTAgent:
                     elif name == 'save':
                         self._save_checkpoint()
                     elif name == 'log':
-                        log.info('ResFiT transitions=%d updates=%d replay=%d %s',
-                                 self.env_steps, self.update_steps, len(self.replay), metrics)
+                        log.info('%s transitions=%d updates=%d replay=%d %s',
+                                 self.algorithm, self.env_steps, self.update_steps, len(self.replay), metrics)
                         if self.wandb_run is not None:
                             self.wandb_run.log(dict(env_steps=self.env_steps, **metrics), step=self.env_steps)
             self._save_checkpoint()

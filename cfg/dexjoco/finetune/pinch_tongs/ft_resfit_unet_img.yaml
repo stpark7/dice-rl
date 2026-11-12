@@ -7,7 +7,7 @@ hydra:
 
 _target_: agent.finetune.train_resfit_agent.TrainResFiTAgent
 name: ${env_name}_resfit_unet_img
-logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-resfit/${name}/${wandb.run}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-resfit/${name}/resfit-s${seed}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 mode: train
 checkpoint_path: null
 eval_base_policy: true
@@ -70,7 +70,6 @@ shape_meta:
 wandb:
   entity: null
   project: dexjoco-${env_name}
-  run: resfit-s${seed}
 
 model:
   _target_: model.rl.resfit.ResFiTModel
