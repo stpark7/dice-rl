@@ -32,7 +32,7 @@ act_steps: 1
 bc_action_steps: 16
 
 env:
-  n_envs: 10
+  n_envs: 4
   name: ${env_name}
   best_reward_threshold_for_success: 1
   max_episode_steps: 400
@@ -91,7 +91,7 @@ model:
 
 train:
   # Total individual simulator transitions, summed across vector workers.
-  num_train_steps: 1000000
+  num_train_steps: 1600000
   batch_size: 256
   # Critic updates per simulator transition; one actor update per UTD cycle.
   utd_ratio: 4
@@ -103,8 +103,8 @@ train:
   gamma: 0.99
   tau: 0.005
   n_step: 3
-  eval_freq: 500  # Paper reporting; use train.eval_freq=2500 for performance measurement.
-  save_freq: 10000
+  eval_freq: 16000
+  save_freq: 0
   log_freq: 1000
   max_grad_norm: 1.0
   preprocess_batch_size: 64
@@ -133,7 +133,7 @@ expert_dataset:
   use_6d_rot: false
   abs_action: false
 
-# Exact total: 100 episodes in 20 batches of 5 environments (ResFiT counts episodes directly).
+# Exact total: 100 episodes in 25 batches of 4 environments (ResFiT counts episodes directly).
 num_eval_episodes: 100
-eval_n_envs: 5
+eval_n_envs: 4
 eval_seed: 10000
