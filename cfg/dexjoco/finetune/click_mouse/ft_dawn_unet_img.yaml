@@ -1,0 +1,130 @@
+# @package _global_
+hydra:
+  run:
+    dir: ${logdir}
+  job:
+    chdir: false
+
+_target_: agent.finetune.train_dawn_agent.TrainDAWNAgent
+name: ${env_name}_dawn_unet_img
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-dawn/${name}/dawn-s${seed}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+mode: train
+checkpoint_path: null
+eval_base_policy: true
+run_eval: true
+
+pretrained_run_dir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-pretrain/pretrained_bc_policy_${env_name}_img
+base_policy_path: ${pretrained_run_dir}/checkpoint/state_2000.pt
+base_policy_config_path: null
+base_policy_weights: model
+normalization_path: ${oc.env:DICE_RL_DATA_DIR,data_dir}/dexjoco/${env_name}-img/ph_pretrain/normalization.npz
+
+env_name: click_mouse
+
+seed: 42
+device: cuda:0
+obs_dim: 23
+action_dim: 22
+horizon_steps: 16
+cond_steps: 1
+img_cond_steps: 1
+# The BC predicts chunks; DAWN corrects one control step at a time.
+act_steps: 1
+bc_action_steps: 16
+
+env:
+  n_envs: 10
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 500
+  save_video: false
+  use_image_obs: true
+  env_type: dexjoco
+  wrappers:
+    dexjoco_image:
+      normalization_path: ${normalization_path}
+      success_steps_before_termination: 1
+      image_keys: [front, wrist]
+      low_dim_keys: [tcp_pose, gripper_pose]
+      shape_meta: ${shape_meta}
+      task_name: ${env_name}
+      policy_mode: true
+      randomize: false
+      render_mode: rgb_array
+      realtime: false
+      max_episode_steps: ${env.max_episode_steps}
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [96, 96, 6]
+    state:
+      shape: [23]
+  action:
+    shape: [22]
+
+wandb:
+  entity: null
+  project: dexjoco-${env_name}
+
+model:
+  _target_: model.rl.dawn.DAWNModel
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  pretrained_policy_path: ${base_policy_path}
+  pretrained_config_path: ${base_policy_config_path}
+  base_policy_weights: ${base_policy_weights}
+  residual_scale: 0.1
+  actor_hidden_dim: 256
+  critic_hidden_dim: 512
+  critic_num_blocks: 2
+  critic_expansion: 4
+  log_std_min: -20
+  log_std_max: 2
+  sac_alpha: 0.01
+  autotune: true
+  target_entropy: null
+  device: ${device}
+
+train:
+  # Individual simulator transitions, summed across vector workers.
+  num_train_steps: 1600000
+  batch_size: 1024
+  # Gradient updates per transition; fractional budgets carry across rollouts.
+  utd_ratio: 0.25
+  training_freq: 64
+  # Warmup executes only the frozen BC. DAWN uses online replay without demos.
+  buffer_warmup_steps: 20000
+  critic_warmup_steps: 0
+  actor_lr: 1e-4
+  critic_lr: 1e-4
+  alpha_lr: 1e-4
+  gamma: 0.97
+  tau: 0.01
+  n_step: 1
+  policy_frequency: 1
+  target_network_frequency: 1
+  # Applied only to replay rewards; evaluation reports original rewards.
+  reward_offset: -1.0
+  eval_freq: 10000
+  save_freq: 10000
+  log_freq: 1000
+  max_grad_norm: 50
+  render:
+    num: 0
+
+replay_buffer:
+  max_size: 200000
+
+# Exactly 100 episodes, using identical seeds for BC and DAWN.
+num_eval_episodes: 100
+eval_n_envs: 5
+eval_seed: 10000
+

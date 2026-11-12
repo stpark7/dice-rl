@@ -112,3 +112,26 @@ it does not control rollout frequency in the current image trainer. `n_envs` is 
 process, so all five configs together would create 60 environments. After
 stopping Hammer Nail and Assembly, the three active training jobs use 40 environments.
 These config files do not change trainer code or establish policy success rates.
+
+## DAWN baseline
+
+The six ResFiT task directories (`click_mouse`, `fold_glasses`, `hammer_nail`,
+`pick_bucket`, `pinch_tongs`, `water_plant`) also provide standalone
+`ft_dawn_unet_img.yaml` configurations. DAWN uses frozen-BC warmup, online
+residual SAC, and twin LayerNorm critics without an expert replay dataset.
+It keeps the task-specific ResFiT environments, BC checkpoints, normalizers,
+and fixed-seed evaluation protocol.
+
+```bash
+python script/run.py \
+  --config-dir=cfg/dexjoco/finetune/pick_bucket \
+  --config-name=ft_dawn_unet_img wandb=null
+```
+
+Set `base_policy_path`, `base_policy_config_path` when necessary, and
+`normalization_path` to the native BC assets being compared. Match the BC's
+prediction horizon; for an 8-step checkpoint use
+`horizon_steps=8 bc_action_steps=8`. DAWN applies residuals at each control
+step (`act_steps=1`). Add `mode=eval checkpoint_path=/path/to/dawn.pt` for
+evaluation. See [DAWN](../../docs/DAWN.md) for training units, SAC settings,
+checkpoint requirements, and differences from the upstream chunked baseline.
