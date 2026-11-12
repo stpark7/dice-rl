@@ -7,7 +7,7 @@ hydra:
 
 _target_: agent.finetune.train_resfit_agent.TrainResFiTAgent
 name: ${env_name}_resfit_unet_img
-logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-resfit/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-resfit/${name}/${wandb.run}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 mode: train
 checkpoint_path: null
 eval_base_policy: true
@@ -32,7 +32,7 @@ act_steps: 1
 bc_action_steps: 16
 
 env:
-  n_envs: 8
+  n_envs: 10
   name: ${env_name}
   best_reward_threshold_for_success: 1
   max_episode_steps: 400
@@ -67,7 +67,10 @@ shape_meta:
   action:
     shape: [22]
 
-wandb: null
+wandb:
+  entity: null
+  project: dexjoco-${env_name}
+  run: resfit-s${seed}
 
 model:
   _target_: model.rl.resfit.ResFiTModel
@@ -101,7 +104,7 @@ train:
   gamma: 0.99
   tau: 0.005
   n_step: 3
-  eval_freq: 10000
+  eval_freq: 500  # Paper reporting; use train.eval_freq=2500 for performance measurement.
   save_freq: 10000
   log_freq: 1000
   max_grad_norm: 1.0
@@ -131,7 +134,7 @@ expert_dataset:
   use_6d_rot: false
   abs_action: false
 
-# Exact total number of episodes, independent of eval_n_envs.
+# Exact total: 100 episodes in 20 batches of 5 environments (ResFiT counts episodes directly).
 num_eval_episodes: 100
-eval_n_envs: 8
+eval_n_envs: 5
 eval_seed: 10000

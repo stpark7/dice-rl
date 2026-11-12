@@ -8,7 +8,7 @@ hydra:
 _target_: agent.finetune.train_distill_residual_flow_img_agent.TrainDistillResidualFlowImgAgent
 
 name: ${env_name}_ft_distill_residual_flow_unet_img_ta${horizon_steps}_fl${flow_steps}
-logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+logdir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-finetune/${name}/${wandb.run}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 # Selected all-demo BC checkpoint: epoch 2000, recorded success 84/100.
 pretrained_run_dir: ${oc.env:DICE_RL_LOG_DIR,log_dir}/dexjoco-pretrain/pretrained_bc_policy_pick_bucket_img
 base_policy_path: ${pretrained_run_dir}/checkpoint/state_2000.pt
@@ -68,8 +68,8 @@ shape_meta:
 
 wandb:
   entity: null
-  project: dexjoco-${env_name}-distill-residual-flow-img-final
-  run: ${now:%Y-%m-%d_%H-%M-%S_%f}_${name}
+  project: dexjoco-${env_name}
+  run: dice-baseline-s${seed}
 
 train:
   # Vector rollout calls; each call executes up to n_envs * act_steps simulator steps.
@@ -79,7 +79,7 @@ train:
   n_steps: 100
   n_train_itr: 1000
   batch_size: 256
-  eval_freq: 1000
+  eval_freq: 500  # Paper reporting; use train.eval_freq=2500 for performance measurement.
   gamma: 0.99
   tau: 0.01
   update_freq: 1
@@ -146,8 +146,8 @@ model:
   bc_loss_weight: 50.0
   critic_weight: 1.0
   use_soft_q_filtering: true
-  q_filtering_warmup_steps: 2000
-  q_underestimation_threshold: -0.5
+  q_filtering_warmup_steps: 1000
+  q_underestimation_threshold: -0.25
   replay_flow_warmup_steps: 3000
   use_q_normalization: true
   disable_q_loss_for_expert_data: true
@@ -177,8 +177,9 @@ expert_dataset:
 visualize_trajectories: false
 visualization_freq: 200000000
 
+# 20 batches * 5 environments = 100 episodes, seeds 10000-10099.
 num_eval_episodes: 20
-eval_n_envs: 10
+eval_n_envs: 5
 
 log_q_overestimation: true
 
