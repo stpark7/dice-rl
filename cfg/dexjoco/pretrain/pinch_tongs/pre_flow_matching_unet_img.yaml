@@ -79,6 +79,7 @@ train:
   update_ema_freq: 10
   save_model_freq: 100
   val_freq: 100
+  n_eval_episodes: 100
   render:
     freq: 2
     num: 0
